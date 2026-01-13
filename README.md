@@ -1,15 +1,16 @@
 do first
 
-run 
-python convert_script.py mnist_ubyte mnist_png
-for the images
-
 run
 pip install numpy nnfs opencv-python pypng
 for imports
 
+run 
+python convert_mnist_to_png.py mnist_ubyte mnist_png
+for the images
+
 end
 
+Neural Network is the Ch19_Final.py
 if you want to train it yourself you can just choose option 1 
 option 1 you will need to add this entire file to your antivirus exclusion or else it would take forever
 otherwise choose option 2
