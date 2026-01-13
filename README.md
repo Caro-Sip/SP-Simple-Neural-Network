@@ -21,3 +21,10 @@ option 1 you will need to add this entire file to your antivirus exclusion or el
 otherwise choose option 2
 it will use pre trained data (the .pkl)
 then it will randomly choose 10 images from the test folder to test
+run 
+python convert_script.py mnist_ubyte mnist_png
+for the images
+
+run
+pip install numpy nnfs opencv-python
+for imports
