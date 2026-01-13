@@ -5,7 +5,7 @@ pip install numpy nnfs opencv-python pypng
 for imports
 
 run 
-python convert_mnist_to_png.py mnist_ubyte mnist_png
+python convert_mnist_to_png.py
 for the images
 
 end
