@@ -48,19 +48,26 @@ if __name__ == '__main__':
 	Ws = [np.random.randn(sizes[i+1], sizes[i]).astype(np.float32) for i in range(len(sizes)-1)]
 	bs = [np.random.randn(sizes[i+1], 1).astype(np.float32) for i in range(len(sizes)-1)]
 
-	# compute feedforward for all hidden layers with sigmoid,
-	# then compute final logits linearly and apply softmax for probabilities
+	# prepare input vector and compute hidden activations using feedforward
 	x_vec = x.reshape(-1, 1).astype(np.float32)
-	for W, b in zip(Ws[:-1], bs[:-1]):
-		x_vec = sigmoid(W.dot(x_vec) + b)
+
+	# use `feedforward` for all layers except the final one so we can
+	# compute final logits here and apply softmax (keeps this change
+	# local to this file, as requested)
+	if len(Ws) > 1:
+		x_vec = feedforward(Ws[:-1], bs[:-1], x_vec)
 
 	# final layer (logits) -- linear, no activation
 	W_last, b_last = Ws[-1], bs[-1]
-	logits = (W_last.dot(x_vec) + b_last).ravel().astype(np.float64)
+	logits = (W_last.dot(x_vec) + b_last).astype(np.float64).ravel()
 
 	# softmax -> probabilities in [0,1] summing to 1
-	exp = np.exp(logits - logits.max())
-	probs = exp / exp.sum()
+	def softmax(z):
+		z = z - np.max(z)
+		exp = np.exp(z)
+		return exp / exp.sum()
+
+	probs = softmax(logits)
 	pred = int(probs.argmax())
 
 	# print each class probability on its own line (0..9)
