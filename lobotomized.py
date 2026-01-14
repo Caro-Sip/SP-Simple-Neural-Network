@@ -3,8 +3,64 @@ import nnfs
 import os
 import cv2
 import pickle
+import random
 
 nnfs.init()
+
+
+# ============== DATA AUGMENTATION ==============
+def augment_image(img):
+    """Apply random augmentations to a 28x28 grayscale image (numpy array).
+    This helps the model generalize to real handwriting."""
+    h, w = img.shape[:2]
+    result = img.copy()
+    
+    # Random rotation (-15 to +15 degrees)
+    if random.random() < 0.7:
+        angle = random.uniform(-15, 15)
+        M = cv2.getRotationMatrix2D((w/2, h/2), angle, 1.0)
+        result = cv2.warpAffine(result, M, (w, h), borderMode=cv2.BORDER_REPLICATE)
+    
+    # Random translation (shift by up to 2 pixels)
+    if random.random() < 0.7:
+        tx = random.uniform(-2, 2)
+        ty = random.uniform(-2, 2)
+        M = np.float32([[1, 0, tx], [0, 1, ty]])
+        result = cv2.warpAffine(result, M, (w, h), borderMode=cv2.BORDER_REPLICATE)
+    
+    # Random scale (zoom in/out slightly)
+    if random.random() < 0.5:
+        scale = random.uniform(0.9, 1.1)
+        M = cv2.getRotationMatrix2D((w/2, h/2), 0, scale)
+        result = cv2.warpAffine(result, M, (w, h), borderMode=cv2.BORDER_REPLICATE)
+    
+    # Random shear
+    if random.random() < 0.3:
+        shear = random.uniform(-0.1, 0.1)
+        M = np.float32([[1, shear, 0], [0, 1, 0]])
+        result = cv2.warpAffine(result, M, (w, h), borderMode=cv2.BORDER_REPLICATE)
+    
+    # Add Gaussian noise
+    if random.random() < 0.3:
+        noise = np.random.normal(0, random.uniform(5, 20), result.shape).astype(np.float32)
+        result = result.astype(np.float32) + noise
+        result = np.clip(result, 0, 255).astype(np.uint8)
+    
+    # Random brightness/contrast
+    if random.random() < 0.3:
+        alpha = random.uniform(0.8, 1.2)  # contrast
+        beta = random.uniform(-20, 20)    # brightness
+        result = cv2.convertScaleAbs(result, alpha=alpha, beta=beta)
+    
+    # Erosion or dilation (thicken/thin strokes)
+    if random.random() < 0.2:
+        kernel = np.ones((2, 2), np.uint8)
+        if random.random() < 0.5:
+            result = cv2.erode(result, kernel, iterations=1)
+        else:
+            result = cv2.dilate(result, kernel, iterations=1)
+    
+    return result
 
 
 # Dense layer
@@ -428,13 +484,13 @@ def save_model(model, filename='mnist_model.pkl'):
         })
     with open(filename, 'wb') as f:
         pickle.dump(model_data, f)
-    print(f"\n✅ Model saved to '{filename}'!")
+    print(f"\n[OK] Model saved to '{filename}'!")
 
 
 def load_model(model, filename='mnist_model.pkl'):
     """Load trained model weights and biases"""
     if not os.path.exists(filename):
-        print(f"\n❌ Error: Model file '{filename}' not found!")
+        print(f"\n[ERROR] Model file '{filename}' not found!")
         print("Please train the model first (Option 1).")
         return False
     with open(filename, 'rb') as f:
@@ -442,27 +498,30 @@ def load_model(model, filename='mnist_model.pkl'):
     for i, layer in enumerate(model.trainable_layers):
         layer.weights = model_data['layers'][i]['weights']
         layer.biases = model_data['layers'][i]['biases']
-    print(f"\n✅ Model loaded from '{filename}'!")
+    print(f"\n[OK] Model loaded from '{filename}'!")
     return True
 
 
 def train_model():
-    """Train the neural network"""
+    """Train the neural network with data augmentation for better handwriting recognition"""
     print("\n" + "="*50)
-    print("TRAINING MODE")
+    print("TRAINING MODE (with augmentation)")
     print("="*50)
-    print("\n📂 Loading MNIST dataset...")
-    X, y, X_test, y_test, _, _ = create_data_mnist('mnist_png')
-    keys = np.array(range(X.shape[0]))
+    print("\n[INFO] Loading MNIST dataset...")
+    X_images, y, X_test_images, y_test, _, _ = create_data_mnist('mnist_png')
+    
+    # Shuffle training data
+    keys = np.array(range(X_images.shape[0]))
     np.random.shuffle(keys)
-    X = X[keys]
+    X_images = X_images[keys]
     y = y[keys]
-    X = (X.reshape(X.shape[0], -1).astype(np.float32) - 127.5) / 127.5
-    X_test = (X_test.reshape(X_test.shape[0], -1).astype(np.float32) - 127.5) / 127.5
-    print(f"✅ Loaded {len(X)} training images and {len(X_test)} test images!")
+    
+    # Prepare validation data (no augmentation)
+    X_test = (X_test_images.reshape(X_test_images.shape[0], -1).astype(np.float32) - 127.5) / 127.5
+    print(f"[OK] Loaded {len(X_images)} training images and {len(X_test_images)} test images!")
     
     model = Model()
-    model.add(Layer_Dense(X.shape[1], 128))
+    model.add(Layer_Dense(784, 128))
     model.add(Activation_ReLU())
     model.add(Layer_Dense(128, 128))
     model.add(Activation_ReLU())
@@ -474,28 +533,58 @@ def train_model():
         accuracy=Accuracy_Categorical()
     )
     model.finalize()
-    print("\n🚀 Starting training...")
+    
+    print("\n[INFO] Starting training with augmentations...")
+    print("(Each epoch uses freshly augmented training images)")
     print("-"*50)
-    model.train(X, y, validation_data=(X_test, y_test),
-                epochs=10, batch_size=128, print_every=100)
+    
+    num_epochs = 10
+    batch_size = 128
+    
+    for epoch in range(1, num_epochs + 1):
+        print(f'\n=== Epoch {epoch}/{num_epochs} (augmenting data...) ===')
+        
+        # Apply augmentation to training images for this epoch
+        X_aug = np.empty_like(X_images)
+        for i in range(X_images.shape[0]):
+            if random.random() < 0.8:  # 80% chance to augment
+                X_aug[i] = augment_image(X_images[i])
+            else:
+                X_aug[i] = X_images[i]
+        
+        # Flatten and normalize
+        X_flat = (X_aug.reshape(X_aug.shape[0], -1).astype(np.float32) - 127.5) / 127.5
+        
+        # Train one epoch
+        model.train(X_flat, y, validation_data=(X_test, y_test),
+                    epochs=1, batch_size=batch_size, print_every=100)
+    
     save_model(model)
-    print("\n✅ Training complete!")
+    print("\n[OK] Training complete!")
     input("\nPress Enter to return to menu...")
 
 
 def test_model():
-    """Test the trained model on random images"""
+    """Test the trained model - draw your own digit with matplotlib"""
     print("\n" + "="*50)
-    print("TESTING MODE")
+    print("TESTING MODE - DRAW YOUR OWN DIGIT")
     print("="*50)
-    print("\n📂 Loading MNIST dataset...")
-    X, y, X_test, y_test, _, filenames_test = create_data_mnist('mnist_png')
-    X_test_images = X_test.copy()
-    X_test = (X_test.reshape(X_test.shape[0], -1).astype(np.float32) - 127.5) / 127.5
-    print(f"✅ Loaded {len(X_test)} test images!")
     
+    # Try to import matplotlib
+    try:
+        import matplotlib
+        matplotlib.use('TkAgg')  # Use TkAgg backend for interactive drawing
+        import matplotlib.pyplot as plt
+        from matplotlib.widgets import Button
+    except ImportError:
+        print("\n[ERROR] matplotlib is required for drawing mode.")
+        print("Install it with: pip install matplotlib")
+        input("\nPress Enter to return to menu...")
+        return
+    
+    # Load model
     model = Model()
-    model.add(Layer_Dense(X_test.shape[1], 128))
+    model.add(Layer_Dense(784, 128))
     model.add(Activation_ReLU())
     model.add(Layer_Dense(128, 128))
     model.add(Activation_ReLU())
@@ -512,76 +601,149 @@ def test_model():
         input("\nPress Enter to return to menu...")
         return
     
-    print("\n" + "="*50)
-    num_tests = min(10, len(X_test))
-    print(f"Testing {num_tests} random images:")
-    print("="*50)
+    # Drawing canvas state
+    canvas_size = 280
+    canvas = np.ones((canvas_size, canvas_size), dtype=np.uint8) * 255
+    drawing = False
+    last_point = None
     
-    if num_tests == 0:
-        print("\n❌ No test images found!")
-        print("Please add images to mnist_png/test/[0-9]/ folders")
-        input("\nPress Enter to return to menu...")
-        return
+    # Create figure and axes
+    fig, (ax_canvas, ax_result) = plt.subplots(1, 2, figsize=(10, 5))
+    fig.suptitle('Draw a digit (0-9) with your mouse', fontsize=14)
     
-    print("\nClose the image window to see the next prediction...")
+    # Canvas for drawing
+    ax_canvas.set_title('Draw here (hold left mouse button)')
+    img_display = ax_canvas.imshow(canvas, cmap='gray', vmin=0, vmax=255)
+    ax_canvas.axis('off')
     
-    correct = 0
-    tested_indices = []
+    # Result display
+    ax_result.set_title('Prediction will appear here')
+    ax_result.axis('off')
+    result_text = ax_result.text(0.5, 0.5, 'Draw a digit\nthen click\n"Predict"', 
+                                  ha='center', va='center', fontsize=16,
+                                  transform=ax_result.transAxes)
     
-    for i in range(num_tests):
-        while True:
-            idx = np.random.randint(0, len(X_test))
-            if idx not in tested_indices:
-                tested_indices.append(idx)
-                break
+    # Add buttons
+    ax_predict = plt.axes([0.3, 0.02, 0.15, 0.06])
+    ax_clear = plt.axes([0.5, 0.02, 0.15, 0.06])
+    ax_exit = plt.axes([0.7, 0.02, 0.15, 0.06])
+    
+    btn_predict = Button(ax_predict, 'Predict')
+    btn_clear = Button(ax_clear, 'Clear')
+    btn_exit = Button(ax_exit, 'Exit')
+    
+    def on_mouse_press(event):
+        nonlocal drawing, last_point
+        if event.inaxes == ax_canvas and event.button == 1:
+            drawing = True
+            last_point = (int(event.xdata), int(event.ydata))
+    
+    def on_mouse_release(event):
+        nonlocal drawing, last_point
+        drawing = False
+        last_point = None
+    
+    def on_mouse_move(event):
+        nonlocal canvas, last_point
+        if drawing and event.inaxes == ax_canvas and event.xdata is not None:
+            x, y = int(event.xdata), int(event.ydata)
+            if 0 <= x < canvas_size and 0 <= y < canvas_size:
+                # Draw a thick line
+                if last_point is not None:
+                    cv2.line(canvas, last_point, (x, y), 0, 15)
+                cv2.circle(canvas, (x, y), 8, 0, -1)
+                last_point = (x, y)
+                img_display.set_data(canvas)
+                fig.canvas.draw_idle()
+    
+    def predict_digit(event):
+        nonlocal canvas
+        # Check if canvas is empty
+        if np.mean(canvas) > 250:
+            result_text.set_text('Canvas is empty!\nDraw something first.')
+            fig.canvas.draw_idle()
+            return
         
-        test_image = X_test[idx:idx+1]
-        test_label = y_test[idx]
-        original_image = X_test_images[idx]
-        actual_filename = filenames_test[idx]
+        # Preprocess: resize to 28x28
+        small_image = cv2.resize(canvas, (28, 28), interpolation=cv2.INTER_AREA)
         
-        output = model.forward(test_image, training=False)
+        # Invert (MNIST is white on black, we drew black on white)
+        small_image = 255 - small_image
+        
+        # Normalize like training data
+        processed = (small_image.astype(np.float32) - 127.5) / 127.5
+        processed = processed.reshape(1, 784)
+        
+        # Make prediction
+        output = model.forward(processed, training=False)
         prediction = np.argmax(output[0])
         confidence = output[0][prediction] * 100
         
-        is_correct = "✅" if prediction == test_label else "❌"
-        if prediction == test_label:
-            correct += 1
+        # Get top 3 predictions
+        top3_indices = np.argsort(output[0])[-3:][::-1]
         
-        print(f"\n{is_correct} Test {i+1}:")
-        print(f"   File: {actual_filename}")
-        print(f"   Predicted: {prediction} (Confidence: {confidence:.2f}%)")
-        print(f"   Actual: {test_label}")
+        # Update result display
+        result_str = f'Prediction: {prediction}\n'
+        result_str += f'Confidence: {confidence:.1f}%\n\n'
+        result_str += 'Top 3:\n'
+        for i, idx in enumerate(top3_indices, 1):
+            result_str += f'{i}. Digit {idx}: {output[0][idx]*100:.1f}%\n'
         
-        display_image = cv2.resize(original_image, (280, 280), 
-                                   interpolation=cv2.INTER_NEAREST)
-        canvas = np.zeros((420, 280), dtype=np.uint8)
-        canvas[140:420, 0:280] = display_image
+        result_text.set_text(result_str)
         
-        color = (0, 255, 0) if prediction == test_label else (0, 0, 255)
+        # Show processed image
+        ax_result.clear()
+        ax_result.set_title(f'Predicted: {prediction} ({confidence:.1f}%)')
+        ax_result.imshow(small_image, cmap='gray')
+        ax_result.axis('off')
+        ax_result.text(0.5, -0.1, result_str, ha='center', va='top', 
+                       fontsize=10, transform=ax_result.transAxes)
         
-        cv2.putText(canvas, f"Predicted: {prediction}", (10, 25), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
-        cv2.putText(canvas, f"Actual: {test_label}", (10, 55), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-        cv2.putText(canvas, f"Confidence: {confidence:.1f}%", (10, 85), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 1)
+        fig.canvas.draw_idle()
         
-        filename_short = actual_filename.split('/')[-1]
-        cv2.putText(canvas, f"File: {filename_short}", (10, 110), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (150, 150, 150), 1)
-        cv2.putText(canvas, f"Path: test/{test_label}/", (10, 130), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (100, 100, 100), 1)
-        
-        window_name = f"Test {i+1}/{num_tests}"
-        cv2.imshow(window_name, canvas)
-        cv2.waitKey(0)
-        cv2.destroyAllWindows()
+        # Also print to console
+        print(f"\n[PREDICTION] Digit: {prediction}, Confidence: {confidence:.2f}%")
+    
+    def clear_canvas(event):
+        nonlocal canvas, last_point
+        canvas = np.ones((canvas_size, canvas_size), dtype=np.uint8) * 255
+        last_point = None
+        img_display.set_data(canvas)
+        ax_result.clear()
+        ax_result.set_title('Prediction will appear here')
+        ax_result.axis('off')
+        result_text = ax_result.text(0.5, 0.5, 'Draw a digit\nthen click\n"Predict"', 
+                                      ha='center', va='center', fontsize=16,
+                                      transform=ax_result.transAxes)
+        fig.canvas.draw_idle()
+        print("\n[INFO] Canvas cleared!")
+    
+    def exit_app(event):
+        plt.close(fig)
+    
+    # Connect events
+    fig.canvas.mpl_connect('button_press_event', on_mouse_press)
+    fig.canvas.mpl_connect('button_release_event', on_mouse_release)
+    fig.canvas.mpl_connect('motion_notify_event', on_mouse_move)
+    
+    btn_predict.on_clicked(predict_digit)
+    btn_clear.on_clicked(clear_canvas)
+    btn_exit.on_clicked(exit_app)
     
     print("\n" + "="*50)
-    accuracy_pct = (correct * 100 // num_tests) if num_tests > 0 else 0
-    print(f"Accuracy: {correct}/{num_tests} ({accuracy_pct}%)")
+    print("INSTRUCTIONS:")
     print("="*50)
+    print("- Hold left mouse button and drag to draw")
+    print("- Click 'Predict' to get prediction")
+    print("- Click 'Clear' to clear canvas")
+    print("- Click 'Exit' or close window to exit")
+    print("="*50)
+    
+    plt.tight_layout()
+    plt.subplots_adjust(bottom=0.12)
+    plt.show()
+    
+    print("\n[OK] Drawing mode closed!")
     input("\nPress Enter to return to menu...")
 
 
@@ -606,10 +768,10 @@ def main():
         elif choice == '2':
             test_model()
         elif choice == '3':
-            print("\n👋 Goodbye!")
+            print("\nGoodbye!")
             break
         else:
-            print("\n❌ Invalid choice! Please enter 1, 2, or 3.")
+            print("\n[ERROR] Invalid choice! Please enter 1, 2, or 3.")
             input("Press Enter to continue...")
 
 
