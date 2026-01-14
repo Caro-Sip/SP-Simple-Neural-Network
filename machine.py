@@ -4,19 +4,24 @@ from PIL import Image
 import tkinter as tk
 import pickle
 import matplotlib.pyplot as plt
+import random
 
 def softmax(Z):
     expZ = np.exp(Z - np.max(Z, axis=1, keepdims=True))
     return expZ / np.sum(expZ, axis=1, keepdims=True)
 
-def load_dataset(path, num_per_digit=10, return_paths=False):
+def load_dataset(path, num_per_digit=10, return_paths=False, random_selection=False):
     X = []
     y = []
     paths = []
 
     for label in range(10):
         folder = f"{path}/{label}"
-        files = os.listdir(folder)[:num_per_digit]
+        files = os.listdir(folder)
+        if random_selection:
+            files = random.sample(files, min(num_per_digit, len(files)))
+        else:
+            files = files[:num_per_digit]
         for file in files:
             img_path = f"{folder}/{file}"
             img = Image.open(img_path).convert("L")
@@ -170,8 +175,8 @@ if __name__ == "__main__":
         else:
             W1, b1, W2, b2, W3, b3 = weights
             
-            print("\nLoading test data (10 images total)...")
-            X_test, y_test, img_paths = load_dataset("mnist_png/test", num_per_digit=1, return_paths=True)
+            print("\nLoading test data (10 random images total)...")
+            X_test, y_test, img_paths = load_dataset("mnist_png/test", num_per_digit=1, return_paths=True, random_selection=True)
             print(f"Loaded {len(X_test)} test images")
             
             print("\nEvaluating model...")
