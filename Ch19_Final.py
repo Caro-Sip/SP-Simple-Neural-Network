@@ -1118,7 +1118,7 @@ def train_model():
     print("TRAINING MODE")
     print("="*50)
     print("\n📂 Loading MNIST dataset...")
-    X, y, X_test, y_test = create_data_mnist('mnist_png')
+    X, y, X_test, y_test, _, _ = create_data_mnist('mnist_png')
     keys = np.array(range(X.shape[0]))
     np.random.shuffle(keys)
     X = X[keys]
