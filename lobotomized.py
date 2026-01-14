@@ -8,6 +8,82 @@ import random
 nnfs.init()
 
 
+# ============== MNIST-STYLE PREPROCESSING ==============
+def preprocess_drawn_image(canvas):
+    """
+    Preprocess a drawn image to match MNIST format:
+    1. Invert colors (MNIST is white digit on black background)
+    2. Find bounding box of the digit
+    3. Crop and center by center of mass
+    4. Resize to 20x20 (MNIST digits are ~20x20 centered in 28x28)
+    5. Pad to 28x28 with digit centered
+    """
+    # Invert: we draw black on white, MNIST is white on black
+    inverted = 255 - canvas
+    
+    # Threshold to get binary image
+    _, binary = cv2.threshold(inverted, 30, 255, cv2.THRESH_BINARY)
+    
+    # Find bounding box of non-zero pixels
+    coords = cv2.findNonZero(binary)
+    if coords is None:
+        return np.zeros((28, 28), dtype=np.uint8)
+    
+    x, y, w, h = cv2.boundingRect(coords)
+    
+    # Add small padding to bounding box
+    pad = 5
+    x = max(0, x - pad)
+    y = max(0, y - pad)
+    w = min(canvas.shape[1] - x, w + 2*pad)
+    h = min(canvas.shape[0] - y, h + 2*pad)
+    
+    # Crop to bounding box
+    cropped = inverted[y:y+h, x:x+w]
+    
+    # Make it square by padding the shorter side
+    if h > w:
+        diff = h - w
+        left_pad = diff // 2
+        right_pad = diff - left_pad
+        cropped = cv2.copyMakeBorder(cropped, 0, 0, left_pad, right_pad, 
+                                      cv2.BORDER_CONSTANT, value=0)
+    elif w > h:
+        diff = w - h
+        top_pad = diff // 2
+        bottom_pad = diff - top_pad
+        cropped = cv2.copyMakeBorder(cropped, top_pad, bottom_pad, 0, 0, 
+                                      cv2.BORDER_CONSTANT, value=0)
+    
+    # Resize to 20x20 (MNIST digits are approximately this size within the 28x28 frame)
+    resized = cv2.resize(cropped, (20, 20), interpolation=cv2.INTER_AREA)
+    
+    # Center in 28x28 image using center of mass
+    # Calculate center of mass
+    M = cv2.moments(resized)
+    if M["m00"] != 0:
+        cx = int(M["m10"] / M["m00"])
+        cy = int(M["m01"] / M["m00"])
+    else:
+        cx, cy = 10, 10
+    
+    # Create 28x28 output and place the digit centered
+    result = np.zeros((28, 28), dtype=np.uint8)
+    
+    # Calculate offset to center the center of mass at (14, 14)
+    offset_x = 14 - cx - 4  # -4 because we're placing 20x20 in 28x28
+    offset_y = 14 - cy - 4
+    
+    # Clamp offsets
+    offset_x = max(0, min(8, offset_x + 4))
+    offset_y = max(0, min(8, offset_y + 4))
+    
+    # Place the 20x20 digit in the 28x28 frame
+    result[offset_y:offset_y+20, offset_x:offset_x+20] = resized
+    
+    return result
+
+
 # ============== DATA AUGMENTATION ==============
 def augment_image(img):
     """Apply random augmentations to a 28x28 grayscale image (numpy array).
@@ -664,11 +740,8 @@ def test_model():
             fig.canvas.draw_idle()
             return
         
-        # Preprocess: resize to 28x28
-        small_image = cv2.resize(canvas, (28, 28), interpolation=cv2.INTER_AREA)
-        
-        # Invert (MNIST is white on black, we drew black on white)
-        small_image = 255 - small_image
+        # Preprocess using MNIST-style preprocessing
+        small_image = preprocess_drawn_image(canvas)
         
         # Normalize like training data
         processed = (small_image.astype(np.float32) - 127.5) / 127.5
@@ -691,7 +764,7 @@ def test_model():
         
         result_text.set_text(result_str)
         
-        # Show processed image
+        # Show processed image (what the model actually sees)
         ax_result.clear()
         ax_result.set_title(f'Predicted: {prediction} ({confidence:.1f}%)')
         ax_result.imshow(small_image, cmap='gray')
@@ -703,6 +776,7 @@ def test_model():
         
         # Also print to console
         print(f"\n[PREDICTION] Digit: {prediction}, Confidence: {confidence:.2f}%")
+        print(f"  Top 3: {[(idx, f'{output[0][idx]*100:.1f}%') for idx in top3_indices]}")
     
     def clear_canvas(event):
         nonlocal canvas, last_point
