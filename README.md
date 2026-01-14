@@ -1,5 +1,6 @@
 # SP-Simple-Neural-Network
-SP semester project
+
+The `main.py` is the program that currently has the ability to forward pass the first image of the ubyte file
 
 https://pypi.org/project/mnist-datasets/
 

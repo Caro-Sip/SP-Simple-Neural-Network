@@ -6,7 +6,7 @@ f = open('mnist_data/train-images-idx3-ubyte', 'rb')
 
 # parameter of file
 image_size = 28
-num_images = 5
+num_images = 100
 
 # skip the header information
 f.read(16)
@@ -25,7 +25,7 @@ data = data.reshape(num_images, image_size, image_size, 1)
 # Retrieved 2026-01-13, License - CC BY-SA 4.0
 
 
-image_index = 0 # first image in the dataset 0 to 4 in this case
-image = np.asarray(data[0]).squeeze()
-plt.imshow(image)
+image_index = 48 # first image in the dataset 0 to 4 in this case
+image = np.asarray(data[image_index]).squeeze()
+plt.imshow(image, cmap='gray')
 plt.show()
