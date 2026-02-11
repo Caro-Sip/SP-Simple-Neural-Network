@@ -3,9 +3,12 @@ import nnfs
 import os
 import cv2
 import pickle
-import random
-
 nnfs.init()
+
+# Dependency to run this code:
+# pip install numpy nnfs opencv-python pypng
+# files needed to run this code:
+# mnist_model.pkl (Traning Data)
 
 
 # ============== MNIST-STYLE PREPROCESSING ==============
