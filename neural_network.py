@@ -1,3 +1,9 @@
+import os
+# Enable multi-threading for NumPy operations
+os.environ.setdefault('OPENBLAS_NUM_THREADS', str(os.cpu_count()))
+os.environ.setdefault('MKL_NUM_THREADS', str(os.cpu_count()))
+os.environ.setdefault('OMP_NUM_THREADS', str(os.cpu_count()))
+
 import numpy as np
 from collections import defaultdict
 
@@ -21,7 +27,13 @@ class NeuralNetwork:
         self.biases = []
         
         for i in range(len(layer_sizes) - 1):
-            W = np.random.randn(layer_sizes[i+1], layer_sizes[i]) * 0.01
+            # He initialization for ReLU, Xavier for sigmoid/tanh
+            if activation == 'relu':
+                scale = np.sqrt(2.0 / layer_sizes[i])  # He initialization
+            else:
+                scale = np.sqrt(1.0 / layer_sizes[i])  # Xavier initialization
+            
+            W = np.random.randn(layer_sizes[i+1], layer_sizes[i]) * scale
             b = np.zeros((layer_sizes[i+1], 1))
             self.weights.append(W)
             self.biases.append(b)
@@ -78,15 +90,21 @@ class NeuralNetwork:
         Forward pass through network.
         
         Args:
-            x: input vector (flattened)
+            x: input vector (flattened) or batch (batch_size, features)
         
         Returns:
             output: predictions from network
         """
-        self.activations = [x.reshape(-1, 1)]
+        # Handle both single samples and batches
+        if x.ndim == 1:
+            x = x.reshape(-1, 1)  # (features, 1)
+        else:
+            x = x.T  # (features, batch_size)
+        
+        self.activations = [x]
         self.pre_activations = []
         
-        a = x.reshape(-1, 1)
+        a = x
         
         for i in range(len(self.weights)):
             z = self.weights[i].dot(a) + self.biases[i]
@@ -99,31 +117,44 @@ class NeuralNetwork:
         return a
     
     def softmax(self, z):
-        """Softmax for multi-class classification"""
-        z = z - np.max(z)
-        exp = np.exp(z)
-        return exp / exp.sum()
+        """Softmax for multi-class classification (handles batches)"""
+        if z.ndim == 1:
+            z = z - np.max(z)
+            exp = np.exp(z)
+            return exp / exp.sum()
+        else:
+            # Batch mode: z is (classes, batch_size)
+            z = z - np.max(z, axis=0, keepdims=True)
+            exp = np.exp(z)
+            return exp / exp.sum(axis=0, keepdims=True)
     
     def cross_entropy_loss(self, predictions, target):
         """
         Cross-entropy loss for classification.
         
         Args:
-            predictions: network output (logits or probabilities)
-            target: one-hot encoded target
+            predictions: network output (logits) - (classes, 1) or (classes, batch_size)
+            target: one-hot encoded target - (classes,) or (batch_size, classes)
         
         Returns:
-            loss: scalar loss value
+            loss: scalar loss value (averaged over batch)
         """
-        # Apply softmax to get probabilities
-        probs = self.softmax(predictions.ravel())
+        # Handle single sample
+        if predictions.ndim == 1 or predictions.shape[1] == 1:
+            probs = self.softmax(predictions.ravel())
+            epsilon = 1e-7
+            probs = np.clip(probs, epsilon, 1 - epsilon)
+            loss = -np.sum(target * np.log(probs))
+            return loss
         
-        # Avoid log(0)
+        # Batch mode: predictions is (classes, batch_size), target is (batch_size, classes)
+        probs = self.softmax(predictions)  # (classes, batch_size)
         epsilon = 1e-7
         probs = np.clip(probs, epsilon, 1 - epsilon)
         
-        # Cross-entropy: -sum(target * log(probs))
-        loss = -np.sum(target * np.log(probs))
+        # Cross-entropy: -sum(target * log(probs)) averaged over batch
+        # target.T is (classes, batch_size)
+        loss = -np.sum(target.T * np.log(probs)) / predictions.shape[1]
         return loss
     
     def backward_pass(self, target):
@@ -131,33 +162,39 @@ class NeuralNetwork:
         Backpropagation: compute deltas and gradients.
         
         Args:
-            target: one-hot encoded target
+            target: one-hot encoded target - (classes,) or (batch_size, classes)
         
         Returns:
-            dW_list, db_list: gradients for each layer
+            dW_list, db_list: gradients for each layer (averaged over batch)
         """
         dW_list = []
         db_list = []
         
-        # Output layer delta
-        # δ^L = (a^L - y) ⊙ σ'(z^L)
-        # For softmax + cross-entropy, δ^L = a^L - y
-        probs = self.softmax(self.pre_activations[-1].ravel())
-        delta = (probs - target).reshape(-1, 1)
+        # Determine batch size
+        if self.pre_activations[-1].shape[1] == 1:
+            # Single sample
+            batch_size = 1
+            probs = self.softmax(self.pre_activations[-1].ravel())
+            delta = (probs - target).reshape(-1, 1)
+        else:
+            # Batch mode
+            batch_size = self.pre_activations[-1].shape[1]
+            probs = self.softmax(self.pre_activations[-1])  # (classes, batch_size)
+            # target is (batch_size, classes), need (classes, batch_size)
+            delta = probs - target.T  # (classes, batch_size)
         
         # Backpropagate through layers
         for i in range(len(self.weights) - 1, -1, -1):
-            # Weight gradient: dW = δ * (a^(l-1))^T
-            dW = delta.dot(self.activations[i].T)
+            # Weight gradient: dW = δ * (a^(l-1))^T / batch_size
+            dW = delta.dot(self.activations[i].T) / batch_size
             
-            # Bias gradient: db = δ
-            db = delta
+            # Bias gradient: db = mean(δ) over batch
+            db = np.mean(delta, axis=1, keepdims=True)
             
             dW_list.insert(0, dW)
             db_list.insert(0, db)
             
             # Propagate delta to previous layer
-            # δ^(l-1) = (W^(l))^T * δ^l ⊙ σ'(z^(l-1))
             if i > 0:
                 delta = self.weights[i].T.dot(delta) * self.get_activation_derivative(
                     self.pre_activations[i-1], is_last=False
@@ -185,7 +222,7 @@ class NeuralNetwork:
     
     def train_epoch(self, X_train, y_train, batch_size=32, shuffle=True):
         """
-        Train for one epoch.
+        Train for one epoch using vectorized batch processing.
         
         Args:
             X_train: training data (N, features)
@@ -209,61 +246,67 @@ class NeuralNetwork:
             end_idx = min(start_idx + batch_size, N)
             batch_indices = indices[start_idx:end_idx]
             
-            batch_loss = 0
+            # Get entire batch at once
+            X_batch = X_train[batch_indices]  # (batch_size, features)
+            y_batch = y_train[batch_indices]  # (batch_size, classes)
             
-            for idx in batch_indices:
-                x = X_train[idx]
-                y = y_train[idx]
-                
-                # Forward pass
-                output = self.forward_pass(x)
-                
-                # Compute loss
-                loss = self.cross_entropy_loss(output, y)
-                batch_loss += loss
-                
-                # Backward pass
-                dW_list, db_list = self.backward_pass(y)
-                
-                # Update weights
-                self.update_weights(dW_list, db_list)
+            # Forward pass for entire batch
+            output = self.forward_pass(X_batch)
             
-            epoch_loss += batch_loss
+            # Compute loss for entire batch
+            loss = self.cross_entropy_loss(output, y_batch)
+            epoch_loss += loss * len(batch_indices)  # Scale by batch size for averaging
+            
+            # Backward pass for entire batch (gradients already averaged)
+            dW_list, db_list = self.backward_pass(y_batch)
+            
+            # Update weights once per batch
+            self.update_weights(dW_list, db_list)
+            
             num_batches += 1
         
-        return epoch_loss / num_batches
+        return epoch_loss / N
     
-    def evaluate(self, X_test, y_test):
+    def evaluate(self, X_test, y_test, batch_size=512):
         """
-        Evaluate accuracy on test set.
+        Evaluate accuracy on test set using vectorized batches.
         
         Args:
             X_test: test data
             y_test: test labels (one-hot encoded)
+            batch_size: batch size for evaluation (larger is faster)
         
         Returns:
             accuracy: percentage of correct predictions
             avg_loss: average loss
         """
-        correct = 0
+        N = X_test.shape[0]
+        total_correct = 0
         total_loss = 0
         
-        for i in range(X_test.shape[0]):
-            x = X_test[i]
-            y = y_test[i]
+        # Process in batches for speed
+        for start_idx in range(0, N, batch_size):
+            end_idx = min(start_idx + batch_size, N)
+            X_batch = X_test[start_idx:end_idx]
+            y_batch = y_test[start_idx:end_idx]
             
-            output = self.forward_pass(x)
-            _, pred = self.predict(x)
-            true_label = np.argmax(y)
+            # Forward pass for batch
+            output = self.forward_pass(X_batch)  # (classes, batch_size)
             
-            if pred == true_label:
-                correct += 1
+            # Get predictions: argmax along class dimension
+            probs = self.softmax(output)  # (classes, batch_size)
+            predictions = np.argmax(probs, axis=0)  # (batch_size,)
+            true_labels = np.argmax(y_batch, axis=1)  # (batch_size,)
             
-            loss = self.cross_entropy_loss(output, y)
-            total_loss += loss
+            # Count correct predictions
+            total_correct += np.sum(predictions == true_labels)
+            
+            # Compute loss
+            loss = self.cross_entropy_loss(output, y_batch)
+            total_loss += loss * len(X_batch)
         
-        accuracy = (correct / X_test.shape[0]) * 100
-        avg_loss = total_loss / X_test.shape[0]
+        accuracy = (total_correct / N) * 100
+        avg_loss = total_loss / N
         
         return accuracy, avg_loss
 
@@ -290,7 +333,7 @@ def train_network(X_train, y_train, X_val, y_val, epochs=10, batch_size=32,
     
     history = defaultdict(list)
     
-    print(f"Training Neural Network")
+    print("Training Neural Network")
     print(f"Architecture: {' -> '.join(map(str, layer_sizes))}")
     print(f"Activation: {activation}, Learning Rate: {learning_rate}")
     print(f"Epochs: {epochs}, Batch Size: {batch_size}")

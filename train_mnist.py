@@ -1,3 +1,9 @@
+import os
+# CRITICAL: Set thread count BEFORE importing NumPy
+os.environ['OPENBLAS_NUM_THREADS'] = str(os.cpu_count())
+os.environ['MKL_NUM_THREADS'] = str(os.cpu_count())
+os.environ['OMP_NUM_THREADS'] = str(os.cpu_count())
+
 import struct
 import numpy as np
 import matplotlib.pyplot as plt
@@ -171,11 +177,11 @@ if __name__ == '__main__':
     print("\n4. Training neural network...")
     
     # Network hyperparameters
-    layer_sizes = [784, 128, 64, 10]
-    learning_rate = 0.01
-    epochs = 50
-    batch_size = 32
-    activation = 'sigmoid'
+    layer_sizes = [784, 256, 128, 10]  # Increased hidden layers for more computation
+    learning_rate = 0.1  # Increased for larger batch size (0.01 * 256/32 ≈ 0.08)
+    epochs = 20
+    batch_size = 256  # Larger batches to saturate all CPU cores
+    activation = 'relu'  # ReLU is faster and learns better than sigmoid
     
     model, history = train_network(
         X_train_split, y_train_split,
