@@ -10,143 +10,8 @@ import pickle
 import random
 nnfs.init()
 
-# Dependencies: pip install numpy nnfs opencv-python pypng matplotlib
+# Dependencies: pip install numpy nnfs opencv-python matplotlib
 # Files needed: mnist_model.pkl (trained model data)
-
-
-# ====================================================================
-#                  IMAGE PREPROCESSING & AUGMENTATION
-# ====================================================================
-
-# ============== MNIST-STYLE PREPROCESSING ==============
-def preprocess_drawn_image(canvas):
-    """
-    Preprocess a drawn image to match MNIST format:
-    1. Invert colors (MNIST is white digit on black background)
-    2. Find bounding box of the digit
-    3. Crop and center by center of mass
-    4. Resize to 20x20 (MNIST digits are ~20x20 centered in 28x28)
-    5. Pad to 28x28 with digit centered
-    """
-    # Invert: we draw black on white, MNIST is white on black
-    inverted = 255 - canvas
-    
-    # Threshold to get binary image
-    _, binary = cv2.threshold(inverted, 30, 255, cv2.THRESH_BINARY)
-    
-    # Find bounding box of non-zero pixels
-    coords = cv2.findNonZero(binary)
-    if coords is None:
-        return np.zeros((28, 28), dtype=np.uint8)
-    
-    x, y, w, h = cv2.boundingRect(coords)
-    
-    # Add small padding to bounding box
-    pad = 5
-    x = max(0, x - pad)
-    y = max(0, y - pad)
-    w = min(canvas.shape[1] - x, w + 2*pad)
-    h = min(canvas.shape[0] - y, h + 2*pad)
-    
-    # Crop to bounding box
-    cropped = inverted[y:y+h, x:x+w]
-    
-    # Make it square by padding the shorter side
-    if h > w:
-        diff = h - w
-        left_pad = diff // 2
-        right_pad = diff - left_pad
-        cropped = cv2.copyMakeBorder(cropped, 0, 0, left_pad, right_pad, 
-                                      cv2.BORDER_CONSTANT, value=0)
-    elif w > h:
-        diff = w - h
-        top_pad = diff // 2
-        bottom_pad = diff - top_pad
-        cropped = cv2.copyMakeBorder(cropped, top_pad, bottom_pad, 0, 0, 
-                                      cv2.BORDER_CONSTANT, value=0)
-    
-    # Resize to 20x20 (MNIST digits are approximately this size within the 28x28 frame)
-    resized = cv2.resize(cropped, (20, 20), interpolation=cv2.INTER_AREA)
-    
-    # Center in 28x28 image using center of mass
-    # Calculate center of mass
-    M = cv2.moments(resized)
-    if M["m00"] != 0:
-        cx = int(M["m10"] / M["m00"])
-        cy = int(M["m01"] / M["m00"])
-    else:
-        cx, cy = 10, 10
-    
-    # Create 28x28 output and place the digit centered
-    result = np.zeros((28, 28), dtype=np.uint8)
-    
-    # Calculate offset to center the center of mass at (14, 14)
-    offset_x = 14 - cx - 4  # -4 because we're placing 20x20 in 28x28
-    offset_y = 14 - cy - 4
-    
-    # Clamp offsets
-    offset_x = max(0, min(8, offset_x + 4))
-    offset_y = max(0, min(8, offset_y + 4))
-    
-    # Place the 20x20 digit in the 28x28 frame
-    result[offset_y:offset_y+20, offset_x:offset_x+20] = resized
-    
-    return result
-
-
-# ============== DATA AUGMENTATION ==============
-def augment_image(img):
-    """Apply random augmentations to a 28x28 grayscale image (numpy array).
-    This helps the model generalize to real handwriting."""
-    h, w = img.shape[:2]
-    result = img.copy()
-    
-    # Random rotation (-15 to +15 degrees)
-    if random.random() < 0.7:
-        angle = random.uniform(-15, 15)
-        M = cv2.getRotationMatrix2D((w/2, h/2), angle, 1.0)
-        result = cv2.warpAffine(result, M, (w, h), borderMode=cv2.BORDER_REPLICATE)
-    
-    # Random translation (shift by up to 2 pixels)
-    if random.random() < 0.7:
-        tx = random.uniform(-2, 2)
-        ty = random.uniform(-2, 2)
-        M = np.float32([[1, 0, tx], [0, 1, ty]])
-        result = cv2.warpAffine(result, M, (w, h), borderMode=cv2.BORDER_REPLICATE)
-    
-    # Random scale (zoom in/out slightly)
-    if random.random() < 0.5:
-        scale = random.uniform(0.9, 1.1)
-        M = cv2.getRotationMatrix2D((w/2, h/2), 0, scale)
-        result = cv2.warpAffine(result, M, (w, h), borderMode=cv2.BORDER_REPLICATE)
-    
-    # Random shear
-    if random.random() < 0.3:
-        shear = random.uniform(-0.1, 0.1)
-        M = np.float32([[1, shear, 0], [0, 1, 0]])
-        result = cv2.warpAffine(result, M, (w, h), borderMode=cv2.BORDER_REPLICATE)
-    
-    # Add Gaussian noise
-    if random.random() < 0.3:
-        noise = np.random.normal(0, random.uniform(5, 20), result.shape).astype(np.float32)
-        result = result.astype(np.float32) + noise
-        result = np.clip(result, 0, 255).astype(np.uint8)
-    
-    # Random brightness/contrast
-    if random.random() < 0.3:
-        alpha = random.uniform(0.8, 1.2)  # contrast
-        beta = random.uniform(-20, 20)    # brightness
-        result = cv2.convertScaleAbs(result, alpha=alpha, beta=beta)
-    
-    # Erosion or dilation (thicken/thin strokes)
-    if random.random() < 0.2:
-        kernel = np.ones((2, 2), np.uint8)
-        if random.random() < 0.5:
-            result = cv2.erode(result, kernel, iterations=1)
-        else:
-            result = cv2.dilate(result, kernel, iterations=1)
-    
-    return result
 
 
 # ====================================================================
@@ -155,273 +20,522 @@ def augment_image(img):
 
 # -------------------- Layers --------------------
 
-# Dense layer
 class Layer_Dense:
-    def __init__(self, n_inputs, n_neurons):
-        self.weights = 0.01 * np.random.randn(n_inputs, n_neurons)
-        self.biases = np.zeros((1, n_neurons))
+    """
+    A Fully Connected (Dense) Layer.
+    Every input neuron connects to every output neuron.
+    Learns by adjusting 'weights' (importance of each input)
+    and 'biases' (baseline offset per neuron).
+    """
+    def __init__(self, num_inputs, num_neurons):
+        # Small random starting weights so outputs don't explode early on
+        self.weights = 0.01 * np.random.randn(num_inputs, num_neurons)
+        # Biases start at zero — one per neuron
+        self.biases = np.zeros((1, num_neurons))
 
     def forward(self, inputs, training):
+        # Save inputs — we'll need them during backprop
         self.inputs = inputs
+        # Core formula: output = inputs × weights + bias
         self.output = np.dot(inputs, self.weights) + self.biases
 
-    def backward(self, dvalues):
-        self.dweights = np.dot(self.inputs.T, dvalues)
-        self.dbiases = np.sum(dvalues, axis=0, keepdims=True)
-        self.dinputs = np.dot(dvalues, self.weights.T)
+    def backward(self, gradients_from_next_layer):
+        # How much each weight contributed to the error
+        self.weight_gradients = np.dot(self.inputs.T, gradients_from_next_layer)
+        # How much each bias contributed to the error
+        self.bias_gradients   = np.sum(gradients_from_next_layer, axis=0, keepdims=True)
+        # How much each input contributed (passed back to the previous layer)
+        self.input_gradients  = np.dot(gradients_from_next_layer, self.weights.T)
 
 
-# Input layer
 class Layer_Input:
+    """
+    A pass-through entry point for raw data.
+    Doesn't transform anything — just holds the input so
+    the first real layer has a 'prev.output' to read from.
+    """
     def forward(self, inputs, training):
         self.output = inputs
 
 
 # -------------------- Activations --------------------
 
-# ReLU activation
 class Activation_ReLU:
+    """
+    ReLU (Rectified Linear Unit) Activation.
+    Rule: if a value is negative → replace with 0. Otherwise keep it.
+    Formula: output = max(0, input)
+
+    Why it exists: without a non-linear activation, stacking multiple
+    layers is mathematically the same as having just one layer.
+    ReLU lets neurons 'switch off' when they're not relevant.
+    """
     def forward(self, inputs, training):
         self.inputs = inputs
         self.output = np.maximum(0, inputs)
 
-    def backward(self, dvalues):
-        self.dinputs = dvalues.copy()
-        self.dinputs[self.inputs <= 0] = 0
+    def backward(self, gradients_from_next_layer):
+        self.input_gradients = gradients_from_next_layer.copy()
+        # Neurons that were off (input ≤ 0) didn't contribute — zero their gradient
+        self.input_gradients[self.inputs <= 0] = 0
 
     def predictions(self, outputs):
         return outputs
 
 
-# Softmax activation
 class Activation_Softmax:
+    """
+    Softmax Activation.
+    Converts raw scores into probabilities that all add up to 1.0 (100%).
+    Used as the final layer in classification networks.
+
+    Example: raw scores [2.1, 0.5, 3.8] → probabilities [0.17, 0.07, 0.76]
+    Now you can say "76% confident this is class 2."
+
+    Uses exp() to make all values positive, then divides by the total
+    so they sum to 1. Subtracting the max first prevents numerical overflow.
+    """
     def forward(self, inputs, training):
         self.inputs = inputs
-        exp_values = np.exp(inputs - np.max(inputs, axis=1, keepdims=True))
+        # Subtract max per row for numerical stability (prevents exp() overflow)
+        exp_values    = np.exp(inputs - np.max(inputs, axis=1, keepdims=True))
         probabilities = exp_values / np.sum(exp_values, axis=1, keepdims=True)
-        self.output = probabilities
+        self.output   = probabilities
 
-    def backward(self, dvalues):
-        self.dinputs = np.empty_like(dvalues)
-        for index, (single_output, single_dvalues) in enumerate(zip(self.output, dvalues)):
+    def backward(self, gradients_from_next_layer):
+        self.input_gradients = np.empty_like(gradients_from_next_layer)
+        for i, (single_output, single_gradient) in \
+                enumerate(zip(self.output, gradients_from_next_layer)):
             single_output = single_output.reshape(-1, 1)
-            jacobian_matrix = np.diagflat(single_output) - np.dot(single_output, single_output.T)
-            self.dinputs[index] = np.dot(jacobian_matrix, single_dvalues)
+            # Jacobian: how each output probability affects every other
+            jacobian_matrix = (np.diagflat(single_output)
+                               - np.dot(single_output, single_output.T))
+            self.input_gradients[i] = np.dot(jacobian_matrix, single_gradient)
 
     def predictions(self, outputs):
+        # Predicted class = the digit with the highest probability
         return np.argmax(outputs, axis=1)
-
-
-# -------------------- Optimizer --------------------
-
-# Simple SGD optimizer
-class Optimizer_SGD:
-    def __init__(self, learning_rate=0.1):
-        self.learning_rate = learning_rate
-        self.current_learning_rate = learning_rate
-
-    def pre_update_params(self):
-        pass
-
-    def update_params(self, layer):
-        layer.weights -= self.learning_rate * layer.dweights
-        layer.biases -= self.learning_rate * layer.dbiases
-
-    def post_update_params(self):
-        pass
 
 
 # -------------------- Loss Functions --------------------
 
-# Common loss class
 class Loss:
-    def calculate(self, output, y):
-        sample_losses = self.forward(output, y)
-        data_loss = np.mean(sample_losses)
-        return data_loss
+    """
+    Base class for loss (error) functions.
+    Averages the per-sample loss into one number.
+    A lower loss = the network is doing better.
+    """
+    def calculate(self, predicted_output, true_labels):
+        per_sample_losses = self.forward(predicted_output, true_labels)
+        average_loss      = np.mean(per_sample_losses)
+        return average_loss
 
 
-# Categorical cross-entropy loss
 class Loss_CategoricalCrossentropy(Loss):
-    def forward(self, y_pred, y_true):
-        samples = len(y_pred)
-        y_pred_clipped = np.clip(y_pred, 1e-7, 1 - 1e-7)
-        
-        if len(y_true.shape) == 1:
-            correct_confidences = y_pred_clipped[range(samples), y_true]
-        elif len(y_true.shape) == 2:
-            correct_confidences = np.sum(y_pred_clipped * y_true, axis=1)
-        
-        negative_log_likelihoods = -np.log(correct_confidences)
-        return negative_log_likelihoods
+    """
+    Categorical Cross-Entropy Loss.
+    Measures how wrong the network's probability predictions are
+    for a classification problem (e.g. which digit 0-9 is this?).
 
-    def backward(self, dvalues, y_true):
-        samples = len(dvalues)
-        labels = len(dvalues[0])
-        
-        if len(y_true.shape) == 1:
-            y_true = np.eye(labels)[y_true]
-        
-        self.dinputs = -y_true / dvalues
-        self.dinputs = self.dinputs / samples
+    Formula: loss = -log(probability assigned to the correct class)
+
+    -log(0.99) ≈ 0.01  → very confident AND correct  → tiny penalty
+    -log(0.50) ≈ 0.69  → uncertain                   → medium penalty
+    -log(0.01) ≈ 4.60  → very confident BUT WRONG     → huge penalty
+
+    The log curve means being confidently wrong is punished especially hard.
+    """
+    def forward(self, predicted_probs, true_labels):
+        num_samples = len(predicted_probs)
+        # Clip to avoid log(0) which is mathematically undefined
+        clipped_probs = np.clip(predicted_probs, 1e-7, 1 - 1e-7)
+
+        if len(true_labels.shape) == 1:
+            # true_labels are class indices e.g. [3, 7, 2, ...]
+            correct_class_probs = clipped_probs[range(num_samples), true_labels]
+        elif len(true_labels.shape) == 2:
+            # true_labels are one-hot vectors e.g. [[0,0,0,1,...], ...]
+            correct_class_probs = np.sum(clipped_probs * true_labels, axis=1)
+
+        losses = -np.log(correct_class_probs)
+        return losses
+
+    def backward(self, predicted_probs, true_labels):
+        num_samples = len(predicted_probs)
+        num_classes = len(predicted_probs[0])
+
+        if len(true_labels.shape) == 1:
+            # Convert class indices to one-hot vectors for the gradient formula
+            true_labels = np.eye(num_classes)[true_labels]
+
+        self.input_gradients = -true_labels / predicted_probs
+        # Normalize by sample count so gradient magnitude doesn't grow with batch size
+        self.input_gradients = self.input_gradients / num_samples
 
 
-# Combined Softmax activation and cross-entropy loss
 class Activation_Softmax_Loss_CategoricalCrossentropy:
-    def backward(self, dvalues, y_true):
-        samples = len(dvalues)
-        if len(y_true.shape) == 2:
-            y_true = np.argmax(y_true, axis=1)
-        self.dinputs = dvalues.copy()
-        self.dinputs[range(samples), y_true] -= 1
-        self.dinputs = self.dinputs / samples
+    """
+    Combined Softmax + Cross-Entropy backward pass shortcut.
+
+    Mathematically, when you work out the gradient of
+    (Softmax followed by CrossEntropyLoss), it simplifies to:
+        gradient = predicted_probabilities - one_hot(true_label)
+
+    This is much simpler and more numerically stable than computing
+    the two backward passes separately. Only used during backpropagation.
+    """
+    def backward(self, predicted_probs, true_labels):
+        num_samples = len(predicted_probs)
+        if len(true_labels.shape) == 2:
+            true_labels = np.argmax(true_labels, axis=1)
+
+        self.input_gradients = predicted_probs.copy()
+        # Subtract 1 from the probability of the correct class
+        self.input_gradients[range(num_samples), true_labels] -= 1
+        # Normalize by sample count
+        self.input_gradients = self.input_gradients / num_samples
+
+
+# -------------------- Optimizer --------------------
+
+class Optimizer_SGD:
+    """
+    SGD (Stochastic Gradient Descent) Optimizer.
+    After backprop computes gradients (how much each weight caused the error),
+    SGD nudges every weight slightly in the direction that reduces the error.
+
+    Formula: new_weight = old_weight - learning_rate × weight_gradient
+
+    learning_rate controls the step size:
+    - Too large  → overshoots the minimum, training becomes unstable
+    - Too small  → takes forever to learn
+
+    'Stochastic' means we update after each mini-batch rather than
+    waiting to process the entire dataset first.
+    """
+    def __init__(self, learning_rate=0.1):
+        self.learning_rate         = learning_rate
+        self.current_learning_rate = learning_rate
+
+    def pre_update_params(self):
+        pass  # Hook for features like learning rate decay
+
+    def update_params(self, layer):
+        # Nudge weights and biases down the gradient slope
+        layer.weights -= self.learning_rate * layer.weight_gradients
+        layer.biases  -= self.learning_rate * layer.bias_gradients
+
+    def post_update_params(self):
+        pass  # Hook for tracking iteration count, etc.
 
 
 # -------------------- Accuracy --------------------
 
-# Categorical accuracy
 class Accuracy_Categorical:
-    def calculate(self, predictions, y):
-        if len(y.shape) == 2:
-            y = np.argmax(y, axis=1)
-        comparisons = predictions == y
-        accuracy = np.mean(comparisons)
+    """
+    Tracks what fraction of predictions match the true labels.
+    Note: accuracy and loss are related but different.
+    A model can improve its loss (confidence calibration) without
+    changing its accuracy (which class it picks).
+    """
+    def calculate(self, predicted_classes, true_labels):
+        if len(true_labels.shape) == 2:
+            true_labels = np.argmax(true_labels, axis=1)
+        correct    = predicted_classes == true_labels
+        accuracy   = np.mean(correct)
         return accuracy
 
 
 # -------------------- Model --------------------
 
-# Model class
 class Model:
+    """
+    The top-level container. Owns all layers and orchestrates:
+    - forward()   : make a prediction by passing data through every layer
+    - backward()  : propagate error gradients back through every layer
+    - train()     : repeat forward → measure loss → backward → update weights
+    """
     def __init__(self):
         self.layers = []
-        self.softmax_classifier_output = None
+        self.softmax_loss_shortcut = None
 
     def add(self, layer):
         self.layers.append(layer)
 
     def set(self, *, loss, optimizer, accuracy):
-        self.loss = loss
+        self.loss      = loss
         self.optimizer = optimizer
-        self.accuracy = accuracy
+        self.accuracy  = accuracy
 
     def finalize(self):
-        self.input_layer = Layer_Input()
-        layer_count = len(self.layers)
+        """
+        Wire each layer to its previous and next layer.
+        forward pass : each layer reads  prev.output
+        backward pass: each layer reads  next.input_gradients
+        """
+        self.input_layer   = Layer_Input()
+        num_layers         = len(self.layers)
         self.trainable_layers = []
 
-        for i in range(layer_count):
+        for i in range(num_layers):
             if i == 0:
                 self.layers[i].prev = self.input_layer
-                self.layers[i].next = self.layers[i+1]
-            elif i < layer_count - 1:
-                self.layers[i].prev = self.layers[i-1]
-                self.layers[i].next = self.layers[i+1]
+                self.layers[i].next = self.layers[i + 1]
+            elif i < num_layers - 1:
+                self.layers[i].prev = self.layers[i - 1]
+                self.layers[i].next = self.layers[i + 1]
             else:
-                self.layers[i].prev = self.layers[i-1]
+                self.layers[i].prev = self.layers[i - 1]
                 self.layers[i].next = self.loss
                 self.output_layer_activation = self.layers[i]
 
             if hasattr(self.layers[i], 'weights'):
                 self.trainable_layers.append(self.layers[i])
 
-        if isinstance(self.layers[-1], Activation_Softmax) and \
-           isinstance(self.loss, Loss_CategoricalCrossentropy):
-            self.softmax_classifier_output = \
+        # Use the faster combined backward pass if Softmax + CrossEntropy are paired
+        if (isinstance(self.layers[-1], Activation_Softmax) and
+                isinstance(self.loss, Loss_CategoricalCrossentropy)):
+            self.softmax_loss_shortcut = \
                 Activation_Softmax_Loss_CategoricalCrossentropy()
 
     def train(self, X, y, *, epochs=1, batch_size=None,
               print_every=1, validation_data=None):
-        train_steps = 1
+        num_steps = 1
 
         if validation_data is not None:
             X_val, y_val = validation_data
 
         if batch_size is not None:
-            train_steps = len(X) // batch_size
-            if train_steps * batch_size < len(X):
-                train_steps += 1
+            num_steps = len(X) // batch_size
+            if num_steps * batch_size < len(X):
+                num_steps += 1
 
-        for epoch in range(1, epochs+1):
+        for epoch in range(1, epochs + 1):
             print(f'epoch: {epoch}')
 
-            for step in range(train_steps):
+            for step in range(num_steps):
+                # Slice the current mini-batch
                 if batch_size is None:
                     batch_X = X
                     batch_y = y
                 else:
-                    batch_X = X[step*batch_size:(step+1)*batch_size]
-                    batch_y = y[step*batch_size:(step+1)*batch_size]
+                    batch_X = X[step * batch_size:(step + 1) * batch_size]
+                    batch_y = y[step * batch_size:(step + 1) * batch_size]
 
+                # 1. Forward pass — make predictions
                 output = self.forward(batch_X, training=True)
+
+                # 2. Measure how wrong the predictions are
                 loss = self.loss.calculate(output, batch_y)
 
-                predictions = self.output_layer_activation.predictions(output)
-                accuracy = self.accuracy.calculate(predictions, batch_y)
+                # 3. Get the predicted class index per sample
+                predicted_classes = self.output_layer_activation.predictions(output)
+                accuracy = self.accuracy.calculate(predicted_classes, batch_y)
 
+                # 4. Backward pass — compute gradients for every weight
                 self.backward(output, batch_y)
 
+                # 5. Update all weights using their gradients
                 self.optimizer.pre_update_params()
                 for layer in self.trainable_layers:
                     self.optimizer.update_params(layer)
                 self.optimizer.post_update_params()
 
-                if not step % print_every or step == train_steps - 1:
-                    print(f'step: {step}, acc: {accuracy:.3f}, loss: {loss:.3f}')
+                if not step % print_every or step == num_steps - 1:
+                    print(f'  step: {step}, acc: {accuracy:.3f}, loss: {loss:.3f}')
 
+            # Evaluate on validation set (no weight updates here)
             if validation_data is not None:
-                output = self.forward(X_val, training=False)
-                val_loss = self.loss.calculate(output, y_val)
-                predictions = self.output_layer_activation.predictions(output)
-                val_accuracy = self.accuracy.calculate(predictions, y_val)
-
-                print(f'validation, acc: {val_accuracy:.3f}, loss: {val_loss:.3f}')
+                val_output   = self.forward(X_val, training=False)
+                val_loss     = self.loss.calculate(val_output, y_val)
+                val_classes  = self.output_layer_activation.predictions(val_output)
+                val_accuracy = self.accuracy.calculate(val_classes, y_val)
+                print(f'  validation, acc: {val_accuracy:.3f}, loss: {val_loss:.3f}')
 
     def forward(self, X, training):
+        """Pass data through every layer left to right."""
         self.input_layer.forward(X, training)
         for layer in self.layers:
             layer.forward(layer.prev.output, training)
-        return layer.output
+        return layer.output  # output of the final layer
 
     def backward(self, output, y):
-        if self.softmax_classifier_output is not None:
-            self.softmax_classifier_output.backward(output, y)
-            self.layers[-1].dinputs = self.softmax_classifier_output.dinputs
+        """
+        Propagate error gradients right to left through every layer.
+        Uses the Softmax+CrossEntropy shortcut when available.
+        """
+        if self.softmax_loss_shortcut is not None:
+            self.softmax_loss_shortcut.backward(output, y)
+            # Inject the shortcut's gradient into the last layer
+            self.layers[-1].input_gradients = \
+                self.softmax_loss_shortcut.input_gradients
             for layer in reversed(self.layers[:-1]):
-                layer.backward(layer.next.dinputs)
+                layer.backward(layer.next.input_gradients)
             return
 
         self.loss.backward(output, y)
         for layer in reversed(self.layers):
-            layer.backward(layer.next.dinputs)
+            layer.backward(layer.next.input_gradients)
+
+
+# ====================================================================
+#                  IMAGE PREPROCESSING & AUGMENTATION
+# ====================================================================
+
+def preprocess_drawn_image(canvas):
+    """
+    Convert a user-drawn image into MNIST format:
+    1. Invert colors (MNIST = white digit on black background)
+    2. Find the digit's bounding box
+    3. Crop, make square, resize to 20x20
+    4. Center the digit by its center of mass inside a 28x28 frame
+    """
+    # We draw black on white; MNIST is white on black — flip it
+    inverted = 255 - canvas
+
+    # Threshold to a clean binary image for bounding box detection
+    _, binary = cv2.threshold(inverted, 30, 255, cv2.THRESH_BINARY)
+
+    nonzero_pixels = cv2.findNonZero(binary)
+    if nonzero_pixels is None:
+        return np.zeros((28, 28), dtype=np.uint8)  # nothing drawn
+
+    x, y, w, h = cv2.boundingRect(nonzero_pixels)
+
+    # Add a small border so the digit doesn't touch the edges
+    pad = 5
+    x = max(0, x - pad)
+    y = max(0, y - pad)
+    w = min(canvas.shape[1] - x, w + 2 * pad)
+    h = min(canvas.shape[0] - y, h + 2 * pad)
+
+    cropped = inverted[y:y + h, x:x + w]
+
+    # Pad shorter dimension to make it square (avoids distortion on resize)
+    if h > w:
+        diff  = h - w
+        left  = diff // 2
+        right = diff - left
+        cropped = cv2.copyMakeBorder(cropped, 0, 0, left, right,
+                                     cv2.BORDER_CONSTANT, value=0)
+    elif w > h:
+        diff   = w - h
+        top    = diff // 2
+        bottom = diff - top
+        cropped = cv2.copyMakeBorder(cropped, top, bottom, 0, 0,
+                                     cv2.BORDER_CONSTANT, value=0)
+
+    # MNIST digits sit in a ~20x20 area inside the 28x28 frame
+    resized = cv2.resize(cropped, (20, 20), interpolation=cv2.INTER_AREA)
+
+    # Use center of mass to position the digit properly in the 28x28 frame
+    moments = cv2.moments(resized)
+    if moments["m00"] != 0:
+        center_x = int(moments["m10"] / moments["m00"])
+        center_y = int(moments["m01"] / moments["m00"])
+    else:
+        center_x, center_y = 10, 10
+
+    output_frame = np.zeros((28, 28), dtype=np.uint8)
+    offset_x = max(0, min(8, offset_x + 4))  # clamp to valid placement range
+    offset_y = max(0, min(8, offset_y + 4))
+    offset_x = max(0, min(8, 14 - center_x))
+    offset_y = max(0, min(8, 14 - center_y))
+    output_frame[offset_y:offset_y + 20, offset_x:offset_x + 20] = resized
+
+    return output_frame
+
+
+def augment_image(img):
+    """
+    Apply random transformations to a training image.
+    More variety during training → model generalizes better to real handwriting.
+    """
+    h, w   = img.shape[:2]
+    result = img.copy()
+
+    # Random rotation — a slightly tilted digit is still the same digit
+    if random.random() < 0.7:
+        angle            = random.uniform(-15, 15)
+        rotation_matrix  = cv2.getRotationMatrix2D((w / 2, h / 2), angle, 1.0)
+        result           = cv2.warpAffine(result, rotation_matrix, (w, h),
+                                          borderMode=cv2.BORDER_REPLICATE)
+
+    # Random translation — digit isn't always perfectly centered
+    if random.random() < 0.7:
+        shift_x      = random.uniform(-2, 2)
+        shift_y      = random.uniform(-2, 2)
+        shift_matrix = np.float32([[1, 0, shift_x], [0, 1, shift_y]])
+        result       = cv2.warpAffine(result, shift_matrix, (w, h),
+                                      borderMode=cv2.BORDER_REPLICATE)
+
+    # Random scale — digit might be written larger or smaller
+    if random.random() < 0.5:
+        scale       = random.uniform(0.9, 1.1)
+        zoom_matrix = cv2.getRotationMatrix2D((w / 2, h / 2), 0, scale)
+        result      = cv2.warpAffine(result, zoom_matrix, (w, h),
+                                     borderMode=cv2.BORDER_REPLICATE)
+
+    # Random shear — a slight slant in the stroke
+    if random.random() < 0.3:
+        shear        = random.uniform(-0.1, 0.1)
+        shear_matrix = np.float32([[1, shear, 0], [0, 1, 0]])
+        result       = cv2.warpAffine(result, shear_matrix, (w, h),
+                                      borderMode=cv2.BORDER_REPLICATE)
+
+    # Gaussian noise — simulates scanner noise or shaky pen strokes
+    if random.random() < 0.3:
+        noise  = np.random.normal(0, random.uniform(5, 20),
+                                  result.shape).astype(np.float32)
+        result = np.clip(result.astype(np.float32) + noise, 0, 255).astype(np.uint8)
+
+    # Random brightness / contrast
+    if random.random() < 0.3:
+        contrast   = random.uniform(0.8, 1.2)
+        brightness = random.uniform(-20, 20)
+        result     = cv2.convertScaleAbs(result, alpha=contrast, beta=brightness)
+
+    # Erosion (thinner strokes) or dilation (thicker strokes)
+    if random.random() < 0.2:
+        kernel = np.ones((2, 2), np.uint8)
+        if random.random() < 0.5:
+            result = cv2.erode(result, kernel, iterations=1)
+        else:
+            result = cv2.dilate(result, kernel, iterations=1)
+
+    return result
 
 
 # ====================================================================
 #                      DATA LOADING & UTILITIES
 # ====================================================================
 
-# Load MNIST dataset
-def load_mnist_dataset(dataset, path):
-    labels = os.listdir(os.path.join(path, dataset))
-    X = []
-    y = []
-    filenames = []
+def load_mnist_dataset(dataset_split, base_path):
+    """
+    Load images from the mnist_png folder structure:
+      mnist_png/train/0/*.png
+      mnist_png/train/1/*.png  ...etc
+    """
+    digit_labels = os.listdir(os.path.join(base_path, dataset_split))
+    images     = []
+    labels     = []
+    file_paths = []
 
-    for label in labels:
-        for file in os.listdir(os.path.join(path, dataset, label)):
-            image = cv2.imread(os.path.join(path, dataset, label, file),
-                              cv2.IMREAD_UNCHANGED)
-            X.append(image)
-            y.append(label)
-            filenames.append(f"{dataset}/{label}/{file}")
+    for digit_label in digit_labels:
+        folder = os.path.join(base_path, dataset_split, digit_label)
+        for filename in os.listdir(folder):
+            image = cv2.imread(os.path.join(folder, filename), cv2.IMREAD_UNCHANGED)
+            images.append(image)
+            labels.append(digit_label)
+            file_paths.append(f"{dataset_split}/{digit_label}/{filename}")
 
-    return np.array(X), np.array(y).astype('uint8'), filenames
+    return np.array(images), np.array(labels).astype('uint8'), file_paths
 
 
 def create_data_mnist(path):
-    X, y, filenames_train = load_mnist_dataset('train', path)
-    X_test, y_test, filenames_test = load_mnist_dataset('test', path)
-    return X, y, X_test, y_test, filenames_train, filenames_test
+    train_images, train_labels, train_paths = load_mnist_dataset('train', path)
+    test_images,  test_labels,  test_paths  = load_mnist_dataset('test',  path)
+    return train_images, train_labels, test_images, test_labels, train_paths, test_paths
 
 
 # ====================================================================
@@ -429,12 +543,12 @@ def create_data_mnist(path):
 # ====================================================================
 
 def save_model(model, filename='mnist_model.pkl'):
-    """Save trained model weights and biases"""
+    """Save the trained weights and biases to disk."""
     model_data = {'layers': []}
     for layer in model.trainable_layers:
         model_data['layers'].append({
             'weights': layer.weights,
-            'biases': layer.biases
+            'biases':  layer.biases
         })
     with open(filename, 'wb') as f:
         pickle.dump(model_data, f)
@@ -442,7 +556,7 @@ def save_model(model, filename='mnist_model.pkl'):
 
 
 def load_model(model, filename='mnist_model.pkl'):
-    """Load trained model weights and biases"""
+    """Load previously saved weights and biases from disk."""
     if not os.path.exists(filename):
         print(f"\n[ERROR] Model file '{filename}' not found!")
         print("Please train the model first (Option 1).")
@@ -451,7 +565,7 @@ def load_model(model, filename='mnist_model.pkl'):
         model_data = pickle.load(f)
     for i, layer in enumerate(model.trainable_layers):
         layer.weights = model_data['layers'][i]['weights']
-        layer.biases = model_data['layers'][i]['biases']
+        layer.biases  = model_data['layers'][i]['biases']
     print(f"\n[OK] Model loaded from '{filename}'!")
     return True
 
@@ -461,23 +575,27 @@ def load_model(model, filename='mnist_model.pkl'):
 # ====================================================================
 
 def train_model():
-    """Train the neural network with data augmentation for better handwriting recognition"""
-    print("\n" + "="*50)
+    print("\n" + "=" * 50)
     print("TRAINING MODE (with augmentation)")
-    print("="*50)
+    print("=" * 50)
     print("\n[INFO] Loading MNIST dataset...")
-    X_images, y, X_test_images, y_test, _, _ = create_data_mnist('mnist_png')
-    
-    # Shuffle training data
-    keys = np.array(range(X_images.shape[0]))
-    np.random.shuffle(keys)
-    X_images = X_images[keys]
-    y = y[keys]
-    
-    # Prepare validation data (no augmentation)
-    X_test = (X_test_images.reshape(X_test_images.shape[0], -1).astype(np.float32) - 127.5) / 127.5
-    print(f"[OK] Loaded {len(X_images)} training images and {len(X_test_images)} test images!")
-    
+
+    train_images, train_labels, test_images, test_labels, _, _ = \
+        create_data_mnist('mnist_png')
+
+    # Shuffle so batches aren't all the same digit
+    shuffle_order = np.array(range(train_images.shape[0]))
+    np.random.shuffle(shuffle_order)
+    train_images = train_images[shuffle_order]
+    train_labels = train_labels[shuffle_order]
+
+    # Normalize test images: pixel 0–255 → roughly -1.0 to +1.0
+    test_images_normalized = (test_images.reshape(test_images.shape[0], -1)
+                               .astype(np.float32) - 127.5) / 127.5
+
+    print(f"[OK] Loaded {len(train_images)} training and "
+          f"{len(test_images)} test images!")
+
     model = Model()
     model.add(Layer_Dense(784, 64))
     model.add(Activation_ReLU())
@@ -489,32 +607,37 @@ def train_model():
         accuracy=Accuracy_Categorical()
     )
     model.finalize()
-    
-    print("\n[INFO] Starting training with augmentations...")
-    print("(Each epoch uses freshly augmented training images)")
-    print("-"*50)
-    
+
+    print("\n[INFO] Starting training with augmentation...")
+    print("(Each epoch re-augments the data for variety)")
+    print("-" * 50)
+
     num_epochs = 10
     batch_size = 128
-    
+
     for epoch in range(1, num_epochs + 1):
         print(f'\n=== Epoch {epoch}/{num_epochs} (augmenting data...) ===')
-        
-        # Apply augmentation to training images for this epoch
-        X_aug = np.empty_like(X_images)
-        for i in range(X_images.shape[0]):
-            if random.random() < 0.8:  # 80% chance to augment
-                X_aug[i] = augment_image(X_images[i])
+
+        # Augment training images fresh each epoch
+        augmented_images = np.empty_like(train_images)
+        for i in range(train_images.shape[0]):
+            if random.random() < 0.8:
+                augmented_images[i] = augment_image(train_images[i])
             else:
-                X_aug[i] = X_images[i]
-        
-        # Flatten and normalize
-        X_flat = (X_aug.reshape(X_aug.shape[0], -1).astype(np.float32) - 127.5) / 127.5
-        
-        # Train one epoch
-        model.train(X_flat, y, validation_data=(X_test, y_test),
-                    epochs=1, batch_size=batch_size, print_every=100)
-    
+                augmented_images[i] = train_images[i]
+
+        # Flatten 28x28 → 784 and normalize 0–255 → -1 to +1
+        augmented_flat = (augmented_images.reshape(augmented_images.shape[0], -1)
+                          .astype(np.float32) - 127.5) / 127.5
+
+        model.train(
+            augmented_flat, train_labels,
+            validation_data=(test_images_normalized, test_labels),
+            epochs=1,
+            batch_size=batch_size,
+            print_every=100
+        )
+
     save_model(model)
     print("\n[OK] Training complete!")
     input("\nPress Enter to return to menu...")
@@ -525,15 +648,13 @@ def train_model():
 # ====================================================================
 
 def test_model():
-    """Test the trained model - draw your own digit with matplotlib"""
-    print("\n" + "="*50)
-    print("TESTING MODE - DRAW YOUR OWN DIGIT")
-    print("="*50)
-    
-    # Try to import matplotlib
+    print("\n" + "=" * 50)
+    print("TESTING MODE — DRAW YOUR OWN DIGIT")
+    print("=" * 50)
+
     try:
         import matplotlib
-        matplotlib.use('TkAgg')  # Use TkAgg backend for interactive drawing
+        matplotlib.use('TkAgg')
         import matplotlib.pyplot as plt
         from matplotlib.widgets import Button
     except ImportError:
@@ -541,8 +662,7 @@ def test_model():
         print("Install it with: pip install matplotlib")
         input("\nPress Enter to return to menu...")
         return
-    
-    # Load model
+
     model = Model()
     model.add(Layer_Dense(784, 64))
     model.add(Activation_ReLU())
@@ -554,152 +674,130 @@ def test_model():
         accuracy=Accuracy_Categorical()
     )
     model.finalize()
-    
+
     if not load_model(model):
         input("\nPress Enter to return to menu...")
         return
-    
-    # Drawing canvas state
+
     canvas_size = 280
-    canvas = np.ones((canvas_size, canvas_size), dtype=np.uint8) * 255
-    drawing = False
-    last_point = None
-    
-    # Create figure and axes
+    canvas      = np.ones((canvas_size, canvas_size), dtype=np.uint8) * 255
+    is_drawing  = False
+    last_point  = None
+
     fig, (ax_canvas, ax_result) = plt.subplots(1, 2, figsize=(10, 5))
-    fig.suptitle('Draw a digit (0-9) with your mouse', fontsize=14)
-    
-    # Canvas for drawing
+    fig.suptitle('Draw a digit (0–9) with your mouse', fontsize=14)
+
     ax_canvas.set_title('Draw here (hold left mouse button)')
-    img_display = ax_canvas.imshow(canvas, cmap='gray', vmin=0, vmax=255)
+    canvas_display = ax_canvas.imshow(canvas, cmap='gray', vmin=0, vmax=255)
     ax_canvas.axis('off')
-    
-    # Result display
+
     ax_result.set_title('Prediction will appear here')
     ax_result.axis('off')
-    result_text = ax_result.text(0.5, 0.5, 'Draw a digit\nthen click\n"Predict"', 
-                                  ha='center', va='center', fontsize=16,
-                                  transform=ax_result.transAxes)
-    
-    # Add buttons
-    ax_predict = plt.axes([0.3, 0.02, 0.15, 0.06])
-    ax_clear = plt.axes([0.5, 0.02, 0.15, 0.06])
-    ax_exit = plt.axes([0.7, 0.02, 0.15, 0.06])
-    
-    btn_predict = Button(ax_predict, 'Predict')
-    btn_clear = Button(ax_clear, 'Clear')
-    btn_exit = Button(ax_exit, 'Exit')
-    
+    status_text = ax_result.text(
+        0.5, 0.5, 'Draw a digit\nthen click\n"Predict"',
+        ha='center', va='center', fontsize=16, transform=ax_result.transAxes
+    )
+
+    ax_btn_predict = plt.axes([0.3, 0.02, 0.15, 0.06])
+    ax_btn_clear   = plt.axes([0.5, 0.02, 0.15, 0.06])
+    ax_btn_exit    = plt.axes([0.7, 0.02, 0.15, 0.06])
+    btn_predict    = Button(ax_btn_predict, 'Predict')
+    btn_clear      = Button(ax_btn_clear,   'Clear')
+    btn_exit       = Button(ax_btn_exit,    'Exit')
+
     def on_mouse_press(event):
-        nonlocal drawing, last_point
+        nonlocal is_drawing, last_point
         if event.inaxes == ax_canvas and event.button == 1:
-            drawing = True
-            last_point = (int(event.xdata), int(event.ydata))
-    
+            is_drawing  = True
+            last_point  = (int(event.xdata), int(event.ydata))
+
     def on_mouse_release(event):
-        nonlocal drawing, last_point
-        drawing = False
-        last_point = None
-    
+        nonlocal is_drawing, last_point
+        is_drawing  = False
+        last_point  = None
+
     def on_mouse_move(event):
         nonlocal canvas, last_point
-        if drawing and event.inaxes == ax_canvas and event.xdata is not None:
+        if is_drawing and event.inaxes == ax_canvas and event.xdata is not None:
             x, y = int(event.xdata), int(event.ydata)
             if 0 <= x < canvas_size and 0 <= y < canvas_size:
-                # Draw a thick line
                 if last_point is not None:
                     cv2.line(canvas, last_point, (x, y), 0, 15)
                 cv2.circle(canvas, (x, y), 8, 0, -1)
                 last_point = (x, y)
-                img_display.set_data(canvas)
+                canvas_display.set_data(canvas)
                 fig.canvas.draw_idle()
-    
-    def predict_digit(event):
+
+    def on_predict_clicked(event):
         nonlocal canvas
-        # Check if canvas is empty
         if np.mean(canvas) > 250:
-            result_text.set_text('Canvas is empty!\nDraw something first.')
+            status_text.set_text('Canvas is empty!\nDraw something first.')
             fig.canvas.draw_idle()
             return
-        
-        # Preprocess using MNIST-style preprocessing
-        small_image = preprocess_drawn_image(canvas)
-        
-        # Normalize like training data
-        processed = (small_image.astype(np.float32) - 127.5) / 127.5
-        processed = processed.reshape(1, 784)
-        
-        # Make prediction
-        output = model.forward(processed, training=False)
-        prediction = np.argmax(output[0])
-        confidence = output[0][prediction] * 100
-        
-        # Get top 3 predictions
-        top3_indices = np.argsort(output[0])[-3:][::-1]
-        
-        # Update result display
-        result_str = f'Prediction: {prediction}\n'
-        result_str += f'Confidence: {confidence:.1f}%\n\n'
-        result_str += 'Top 3:\n'
-        for i, idx in enumerate(top3_indices, 1):
-            result_str += f'{i}. Digit {idx}: {output[0][idx]*100:.1f}%\n'
-        
-        result_text.set_text(result_str)
-        
-        # Show processed image (what the model actually sees)
+
+        # Preprocess → normalize → flatten → predict
+        preprocessed    = preprocess_drawn_image(canvas)
+        normalized      = (preprocessed.astype(np.float32) - 127.5) / 127.5
+        flat_input      = normalized.reshape(1, 784)
+
+        output          = model.forward(flat_input, training=False)
+        predicted_digit = int(np.argmax(output[0]))
+        confidence_pct  = float(output[0][predicted_digit]) * 100
+
+        top3 = np.argsort(output[0])[-3:][::-1]
+        result_str  = f'Prediction: {predicted_digit}\n'
+        result_str += f'Confidence: {confidence_pct:.1f}%\n\nTop 3:\n'
+        for rank, digit_idx in enumerate(top3, 1):
+            result_str += f'{rank}. Digit {digit_idx}: {output[0][digit_idx] * 100:.1f}%\n'
+
         ax_result.clear()
-        ax_result.set_title(f'Predicted: {prediction} ({confidence:.1f}%)')
-        ax_result.imshow(small_image, cmap='gray')
+        ax_result.set_title(f'Predicted: {predicted_digit} ({confidence_pct:.1f}%)')
+        ax_result.imshow(preprocessed, cmap='gray')
         ax_result.axis('off')
-        ax_result.text(0.5, -0.1, result_str, ha='center', va='top', 
+        ax_result.text(0.5, -0.1, result_str, ha='center', va='top',
                        fontsize=10, transform=ax_result.transAxes)
-        
         fig.canvas.draw_idle()
-        
-        # Also print to console
-        print(f"\n[PREDICTION] Digit: {prediction}, Confidence: {confidence:.2f}%")
-        print(f"  Top 3: {[(idx, f'{output[0][idx]*100:.1f}%') for idx in top3_indices]}")
-    
-    def clear_canvas(event):
+
+        print(f"\n[PREDICTION] Digit: {predicted_digit}, "
+              f"Confidence: {confidence_pct:.2f}%")
+
+    def on_clear_clicked(event):
         nonlocal canvas, last_point
-        canvas = np.ones((canvas_size, canvas_size), dtype=np.uint8) * 255
-        last_point = None
-        img_display.set_data(canvas)
+        canvas      = np.ones((canvas_size, canvas_size), dtype=np.uint8) * 255
+        last_point  = None
+        canvas_display.set_data(canvas)
         ax_result.clear()
         ax_result.set_title('Prediction will appear here')
         ax_result.axis('off')
-        result_text = ax_result.text(0.5, 0.5, 'Draw a digit\nthen click\n"Predict"', 
-                                      ha='center', va='center', fontsize=16,
-                                      transform=ax_result.transAxes)
+        ax_result.text(0.5, 0.5, 'Draw a digit\nthen click\n"Predict"',
+                       ha='center', va='center', fontsize=16,
+                       transform=ax_result.transAxes)
         fig.canvas.draw_idle()
         print("\n[INFO] Canvas cleared!")
-    
-    def exit_app(event):
+
+    def on_exit_clicked(event):
         plt.close(fig)
-    
-    # Connect events
-    fig.canvas.mpl_connect('button_press_event', on_mouse_press)
+
+    fig.canvas.mpl_connect('button_press_event',   on_mouse_press)
     fig.canvas.mpl_connect('button_release_event', on_mouse_release)
-    fig.canvas.mpl_connect('motion_notify_event', on_mouse_move)
-    
-    btn_predict.on_clicked(predict_digit)
-    btn_clear.on_clicked(clear_canvas)
-    btn_exit.on_clicked(exit_app)
-    
-    print("\n" + "="*50)
+    fig.canvas.mpl_connect('motion_notify_event',  on_mouse_move)
+
+    btn_predict.on_clicked(on_predict_clicked)
+    btn_clear.on_clicked(on_clear_clicked)
+    btn_exit.on_clicked(on_exit_clicked)
+
+    print("\n" + "=" * 50)
     print("INSTRUCTIONS:")
-    print("="*50)
     print("- Hold left mouse button and drag to draw")
-    print("- Click 'Predict' to get prediction")
-    print("- Click 'Clear' to clear canvas")
-    print("- Click 'Exit' or close window to exit")
-    print("="*50)
-    
+    print("- Click 'Predict' to get a prediction")
+    print("- Click 'Clear' to start over")
+    print("- Click 'Exit' or close the window to quit")
+    print("=" * 50)
+
     plt.tight_layout()
     plt.subplots_adjust(bottom=0.12)
     plt.show()
-    
-    print("\n[OK] Drawing mode closed!")
+
     input("\nPress Enter to return to menu...")
 
 
@@ -708,21 +806,19 @@ def test_model():
 # ====================================================================
 
 def show_menu():
-    """Display main menu"""
-    print("\n" + "="*50)
-    print("MNIST DIGIT RECOGNITION - NEURAL NETWORK")
-    print("="*50)
-    print("\n1. Train Model (and save)")
-    print("2. Test Model (load and predict)")
-    print("3. Exit")
-    print("\n" + "="*50)
+    print("\n" + "=" * 50)
+    print("  MNIST DIGIT RECOGNITION — NEURAL NETWORK")
+    print("=" * 50)
+    print("\n  1. Train Model (and save)")
+    print("  2. Test Model  (load and draw)")
+    print("  3. Exit")
+    print("\n" + "=" * 50)
 
 
 def main():
-    """Main menu loop"""
     while True:
         show_menu()
-        choice = input("\nEnter your choice (1-3): ").strip()
+        choice = input("\nEnter your choice (1–3): ").strip()
         if choice == '1':
             train_model()
         elif choice == '2':
@@ -731,7 +827,7 @@ def main():
             print("\nGoodbye!")
             break
         else:
-            print("\n[ERROR] Invalid choice! Please enter 1, 2, or 3.")
+            print("\n[ERROR] Invalid choice. Please enter 1, 2, or 3.")
             input("Press Enter to continue...")
 
 
