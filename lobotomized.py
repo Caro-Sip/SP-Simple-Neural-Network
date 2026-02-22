@@ -437,8 +437,7 @@ def preprocess_drawn_image(canvas):
         center_x, center_y = 10, 10
 
     output_frame = np.zeros((28, 28), dtype=np.uint8)
-    offset_x = max(0, min(8, offset_x + 4))  # clamp to valid placement range
-    offset_y = max(0, min(8, offset_y + 4))
+    # Offset so the digit's center of mass lands near the middle of the 28x28 frame
     offset_x = max(0, min(8, 14 - center_x))
     offset_y = max(0, min(8, 14 - center_y))
     output_frame[offset_y:offset_y + 20, offset_x:offset_x + 20] = resized
