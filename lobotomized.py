@@ -646,6 +646,37 @@ def train_model():
 #                    UI & INTERACTIVE TESTING
 # ====================================================================
 
+def interpolate_points(p1, p2, num_points=10):
+    """Generate intermediate points between two points for smoother lines."""
+    x1, y1 = p1
+    x2, y2 = p2
+    points = []
+    for i in range(num_points + 1):
+        t = i / num_points
+        x = int(x1 + t * (x2 - x1))
+        y = int(y1 + t * (y2 - y1))
+        points.append((x, y))
+    return points
+
+
+def draw_smooth_line(canvas, p1, p2, brush_size=12):
+    """Draw a smooth anti-aliased line between two points."""
+    # Calculate distance between points for adaptive interpolation
+    dist = np.sqrt((p2[0] - p1[0])**2 + (p2[1] - p1[1])**2)
+    # More interpolation points for smoother lines during fast movement
+    num_points = max(int(dist), 1)
+    
+    points = interpolate_points(p1, p2, num_points)
+    
+    # Draw circles at each point for consistent thickness
+    for point in points:
+        cv2.circle(canvas, point, brush_size, 0, -1, lineType=cv2.LINE_AA)
+    
+    # Draw main anti-aliased line
+    cv2.line(canvas, p1, p2, 0, brush_size * 2, lineType=cv2.LINE_AA)
+    return canvas
+
+
 def test_model():
     print("\n" + "=" * 50)
     print("TESTING MODE — DRAW YOUR OWN DIGIT")
@@ -656,6 +687,8 @@ def test_model():
         matplotlib.use('TkAgg')
         import matplotlib.pyplot as plt
         from matplotlib.widgets import Button
+        from matplotlib.patches import FancyBboxPatch, Rectangle
+        import matplotlib.patches as mpatches
     except ImportError:
         print("\n[ERROR] matplotlib is required for drawing mode.")
         print("Install it with: pip install matplotlib")
@@ -678,108 +711,284 @@ def test_model():
         input("\nPress Enter to return to menu...")
         return
 
+    # --- UI Configuration ---
     canvas_size = 280
-    canvas      = np.ones((canvas_size, canvas_size), dtype=np.uint8) * 255
-    is_drawing  = False
-    last_point  = None
-
-    fig, (ax_canvas, ax_result) = plt.subplots(1, 2, figsize=(10, 5))
-    fig.suptitle('Draw a digit (0–9) with your mouse', fontsize=14)
-
-    ax_canvas.set_title('Draw here (hold left mouse button)')
-    canvas_display = ax_canvas.imshow(canvas, cmap='gray', vmin=0, vmax=255)
+    brush_size = 16
+    canvas = np.ones((canvas_size, canvas_size), dtype=np.uint8) * 255
+    is_drawing = False
+    background = None  # For blitting optimization
+    last_point = None
+    stroke_points = []  # Store points for smooth drawing
+    
+    # Color scheme
+    bg_color = '#1a1a2e'
+    panel_color = '#16213e'
+    accent_color = '#0f3460'
+    highlight_color = '#e94560'
+    text_color = '#eaeaea'
+    success_color = '#00d26a'
+    
+    # Create figure with dark theme
+    plt.style.use('dark_background')
+    fig = plt.figure(figsize=(14, 7), facecolor=bg_color)
+    fig.canvas.manager.set_window_title('MNIST Digit Recognition')
+    
+    # Create grid layout
+    gs = fig.add_gridspec(3, 4, height_ratios=[0.1, 0.75, 0.15], 
+                          width_ratios=[0.05, 0.4, 0.4, 0.15],
+                          hspace=0.15, wspace=0.1)
+    
+    # Title area
+    ax_title = fig.add_subplot(gs[0, :])
+    ax_title.set_facecolor(bg_color)
+    ax_title.axis('off')
+    ax_title.text(0.5, 0.65, 'Neural Network Digit Recognition', 
+                  fontsize=22, fontweight='bold', color=text_color,
+                  ha='center', va='center', transform=ax_title.transAxes)
+    ax_title.text(0.5, 0.15, 'Draw a digit (0-9) and let the AI predict it', 
+                  fontsize=12, color='#888888', ha='center', va='center',
+                  transform=ax_title.transAxes)
+    
+    # Canvas area
+    ax_canvas = fig.add_subplot(gs[1, 1])
+    ax_canvas.set_facecolor(panel_color)
+    ax_canvas.set_title('Drawing Canvas', fontsize=14, color=text_color, pad=10)
+    canvas_display = ax_canvas.imshow(canvas, cmap='gray', vmin=0, vmax=255,
+                                       aspect='equal', interpolation='bilinear')
     ax_canvas.axis('off')
-
-    ax_result.set_title('Prediction will appear here')
+    
+    # Add border around canvas
+    for spine in ax_canvas.spines.values():
+        spine.set_edgecolor(accent_color)
+        spine.set_linewidth(2)
+    
+    # Result area
+    ax_result = fig.add_subplot(gs[1, 2])
+    ax_result.set_facecolor(panel_color)
+    # ax_result.set_title('Prediction Result', fontsize=14, color=text_color, pad=10)
     ax_result.axis('off')
-    status_text = ax_result.text(
-        0.5, 0.5, 'Draw a digit\nthen click\n"Predict"',
-        ha='center', va='center', fontsize=16, transform=ax_result.transAxes
+    
+    # Initial placeholder text
+    result_text = ax_result.text(
+        0.5, 0.5, 'Draw a digit\nand click\nPredict',
+        ha='center', va='center', fontsize=18, color='#666666',
+        transform=ax_result.transAxes, style='italic'
     )
-
-    ax_btn_predict = plt.axes([0.3, 0.02, 0.15, 0.06])
-    ax_btn_clear   = plt.axes([0.5, 0.02, 0.15, 0.06])
-    ax_btn_exit    = plt.axes([0.7, 0.02, 0.15, 0.06])
-    btn_predict    = Button(ax_btn_predict, 'Predict')
-    btn_clear      = Button(ax_btn_clear,   'Clear')
-    btn_exit       = Button(ax_btn_exit,    'Exit')
+    
+    # Confidence bars area
+    ax_bars = fig.add_subplot(gs[1, 3])
+    ax_bars.set_facecolor(panel_color)
+    ax_bars.set_title('Confidence', fontsize=12, color=text_color, pad=10)
+    ax_bars.set_xlim(0, 1)
+    ax_bars.set_ylim(-0.5, 9.5)
+    ax_bars.set_yticks(range(10))
+    ax_bars.set_yticklabels([str(i) for i in range(10)], color=text_color, fontsize=11)
+    ax_bars.set_xticks([])
+    ax_bars.invert_yaxis()
+    ax_bars.spines['top'].set_visible(False)
+    ax_bars.spines['right'].set_visible(False)
+    ax_bars.spines['bottom'].set_visible(False)
+    ax_bars.spines['left'].set_color(accent_color)
+    
+    # Initialize empty bars
+    bars = ax_bars.barh(range(10), [0]*10, color=accent_color, height=0.6)
+    bar_labels = []
+    for i in range(10):
+        label = ax_bars.text(0.02, i, '', va='center', ha='left', 
+                            color=text_color, fontsize=9, fontweight='bold')
+        bar_labels.append(label)
+    
+    # Button area
+    ax_buttons = fig.add_subplot(gs[2, 1:3])
+    ax_buttons.set_facecolor(bg_color)
+    ax_buttons.axis('off')
+    
+    # Custom styled buttons
+    button_width = 0.12
+    button_height = 0.5
+    button_y = 0.25
+    
+    ax_btn_predict = fig.add_axes([0.25, 0.08, 0.15, 0.05])
+    ax_btn_clear = fig.add_axes([0.42, 0.08, 0.15, 0.05])
+    ax_btn_exit = fig.add_axes([0.59, 0.08, 0.15, 0.05])
+    
+    btn_predict = Button(ax_btn_predict, 'Predict', color=success_color, hovercolor='#00b359')
+    btn_clear = Button(ax_btn_clear, 'Clear', color=accent_color, hovercolor='#1a4a7a')
+    btn_exit = Button(ax_btn_exit, 'Exit', color=highlight_color, hovercolor='#c73750')
+    
+    # Style button text
+    btn_predict.label.set_fontsize(12)
+    btn_predict.label.set_fontweight('bold')
+    btn_predict.label.set_color('white')
+    btn_clear.label.set_fontsize(12)
+    btn_clear.label.set_fontweight('bold')
+    btn_clear.label.set_color('white')
+    btn_exit.label.set_fontsize(12)
+    btn_exit.label.set_fontweight('bold')
+    btn_exit.label.set_color('white')
+    
+    # Instructions text
+    ax_instructions = fig.add_axes([0.05, 0.02, 0.15, 0.05])
+    ax_instructions.axis('off')
+    ax_instructions.text(0, 0.5, 'Hold left mouse button to draw', 
+                        fontsize=9, color='#666666', va='center')
 
     def on_mouse_press(event):
-        nonlocal is_drawing, last_point
+        nonlocal is_drawing, last_point, stroke_points, background
         if event.inaxes == ax_canvas and event.button == 1:
-            is_drawing  = True
-            last_point  = (int(event.xdata), int(event.ydata))
+            is_drawing = True
+            x, y = int(event.xdata), int(event.ydata)
+            last_point = (x, y)
+            stroke_points = [(x, y)]
+            # Capture background for blitting
+            fig.canvas.draw()
+            background = fig.canvas.copy_from_bbox(ax_canvas.bbox)
+            # Draw initial point
+            cv2.circle(canvas, (x, y), brush_size, 0, -1, lineType=cv2.LINE_AA)
+            canvas_display.set_data(canvas)
+            ax_canvas.draw_artist(canvas_display)
+            fig.canvas.blit(ax_canvas.bbox)
 
     def on_mouse_release(event):
-        nonlocal is_drawing, last_point
-        is_drawing  = False
-        last_point  = None
+        nonlocal is_drawing, last_point, stroke_points, canvas, background
+        if is_drawing:
+            # Apply slight Gaussian blur for smoother edges
+            canvas = cv2.GaussianBlur(canvas, (3, 3), 0)
+            canvas_display.set_data(canvas)
+            fig.canvas.draw_idle()
+        is_drawing = False
+        last_point = None
+        stroke_points = []
+        background = None
 
     def on_mouse_move(event):
-        nonlocal canvas, last_point
+        nonlocal canvas, last_point, stroke_points, background
         if is_drawing and event.inaxes == ax_canvas and event.xdata is not None:
             x, y = int(event.xdata), int(event.ydata)
             if 0 <= x < canvas_size and 0 <= y < canvas_size:
+                current_point = (x, y)
+                
                 if last_point is not None:
-                    cv2.line(canvas, last_point, (x, y), 0, 15)
-                cv2.circle(canvas, (x, y), 8, 0, -1)
-                last_point = (x, y)
+                    # Draw smooth line between points
+                    draw_smooth_line(canvas, last_point, current_point, brush_size)
+                
+                stroke_points.append(current_point)
+                last_point = current_point
+                
+                # Use blitting for faster rendering
                 canvas_display.set_data(canvas)
-                fig.canvas.draw_idle()
+                if background is not None:
+                    fig.canvas.restore_region(background)
+                ax_canvas.draw_artist(canvas_display)
+                fig.canvas.blit(ax_canvas.bbox)
+
+    def update_confidence_bars(output):
+        """Update the confidence bar chart."""
+        probs = output[0]
+        max_idx = np.argmax(probs)
+        
+        for i, (bar, prob, label) in enumerate(zip(bars, probs, bar_labels)):
+            bar.set_width(prob)
+            
+            # Color scheme: highlight the predicted digit
+            if i == max_idx:
+                bar.set_color(success_color)
+            elif prob > 0.1:
+                bar.set_color(highlight_color)
+            else:
+                bar.set_color(accent_color)
+            
+            # Update percentage label
+            if prob > 0.05:
+                label.set_text(f'{prob*100:.0f}%')
+                label.set_x(prob + 0.02)
+            else:
+                label.set_text('')
 
     def on_predict_clicked(event):
         nonlocal canvas
         if np.mean(canvas) > 250:
-            status_text.set_text('Canvas is empty!\nDraw something first.')
+            result_text.set_text('Canvas is empty!\nDraw something first.')
+            result_text.set_color(highlight_color)
             fig.canvas.draw_idle()
             return
 
-        # Preprocess → normalize → flatten → predict
-        preprocessed    = preprocess_drawn_image(canvas)
-        normalized      = (preprocessed.astype(np.float32) - 127.5) / 127.5
-        flat_input      = normalized.reshape(1, 784)
+        # Preprocess -> normalize -> flatten -> predict
+        preprocessed = preprocess_drawn_image(canvas)
+        normalized = (preprocessed.astype(np.float32) - 127.5) / 127.5
+        flat_input = normalized.reshape(1, 784)
 
-        output          = model.forward(flat_input, training=False)
+        output = model.forward(flat_input, training=False)
         predicted_digit = int(np.argmax(output[0]))
-        confidence_pct  = float(output[0][predicted_digit]) * 100
+        confidence_pct = float(output[0][predicted_digit]) * 100
 
-        top3 = np.argsort(output[0])[-3:][::-1]
-        result_str  = f'Prediction: {predicted_digit}\n'
-        result_str += f'Confidence: {confidence_pct:.1f}%\n\nTop 3:\n'
-        for rank, digit_idx in enumerate(top3, 1):
-            result_str += f'{rank}. Digit {digit_idx}: {output[0][digit_idx] * 100:.1f}%\n'
-
+        # Update result display
         ax_result.clear()
-        ax_result.set_title(f'Predicted: {predicted_digit} ({confidence_pct:.1f}%)')
-        ax_result.imshow(preprocessed, cmap='gray')
+        ax_result.set_facecolor(panel_color)
         ax_result.axis('off')
-        ax_result.text(0.5, -0.1, result_str, ha='center', va='top',
-                       fontsize=10, transform=ax_result.transAxes)
+        
+        # Determine confidence color
+        if confidence_pct >= 80:
+            conf_color = success_color
+        elif confidence_pct >= 50:
+            conf_color = '#ffa500'
+        else:
+            conf_color = highlight_color
+        
+        # Display prediction text at top of axes
+        ax_result.text(0.5, 0.98, f'Predicted: {predicted_digit}', 
+                      fontsize=22, fontweight='bold', color=conf_color,
+                      ha='center', va='top', transform=ax_result.transAxes)
+        ax_result.text(0.5, 0.82, f'Confidence: {confidence_pct:.1f}%', 
+                      fontsize=12, color=text_color,
+                      ha='center', va='top', transform=ax_result.transAxes)
+        
+        # Show preprocessed image in lower portion
+        ax_result.imshow(preprocessed, cmap='gray', aspect='equal', 
+                        extent=[0, 28, 0, 28])
+        ax_result.set_xlim(-5, 33)
+        ax_result.set_ylim(-2, 45)
+        
+        # Update confidence bars
+        update_confidence_bars(output)
+        
         fig.canvas.draw_idle()
-
+        
         print(f"\n[PREDICTION] Digit: {predicted_digit}, "
               f"Confidence: {confidence_pct:.2f}%")
 
     def on_clear_clicked(event):
-        nonlocal canvas, last_point
-        canvas      = np.ones((canvas_size, canvas_size), dtype=np.uint8) * 255
-        last_point  = None
+        nonlocal canvas, last_point, stroke_points
+        canvas = np.ones((canvas_size, canvas_size), dtype=np.uint8) * 255
+        last_point = None
+        stroke_points = []
         canvas_display.set_data(canvas)
+        
+        # Reset result area
         ax_result.clear()
-        ax_result.set_title('Prediction will appear here')
+        ax_result.set_facecolor(panel_color)
+        # ax_result.set_title('Prediction Result', fontsize=14, color=text_color, pad=10)
         ax_result.axis('off')
-        ax_result.text(0.5, 0.5, 'Draw a digit\nthen click\n"Predict"',
-                       ha='center', va='center', fontsize=16,
-                       transform=ax_result.transAxes)
+        ax_result.text(0.5, 0.5, 'Draw a digit\nand click\nPredict',
+                      ha='center', va='center', fontsize=18, color='#666666',
+                      style='italic', transform=ax_result.transAxes)
+        
+        # Reset confidence bars
+        for bar, label in zip(bars, bar_labels):
+            bar.set_width(0)
+            bar.set_color(accent_color)
+            label.set_text('')
+        
         fig.canvas.draw_idle()
         print("\n[INFO] Canvas cleared!")
 
     def on_exit_clicked(event):
         plt.close(fig)
 
-    fig.canvas.mpl_connect('button_press_event',   on_mouse_press)
+    # Connect event handlers
+    fig.canvas.mpl_connect('button_press_event', on_mouse_press)
     fig.canvas.mpl_connect('button_release_event', on_mouse_release)
-    fig.canvas.mpl_connect('motion_notify_event',  on_mouse_move)
+    fig.canvas.mpl_connect('motion_notify_event', on_mouse_move)
 
     btn_predict.on_clicked(on_predict_clicked)
     btn_clear.on_clicked(on_clear_clicked)
@@ -793,8 +1002,6 @@ def test_model():
     print("- Click 'Exit' or close the window to quit")
     print("=" * 50)
 
-    plt.tight_layout()
-    plt.subplots_adjust(bottom=0.12)
     plt.show()
 
     input("\nPress Enter to return to menu...")
